@@ -1,20 +1,20 @@
-use super::{CvdHeadError, CvdMeta};
+use super::{HeadError, Meta};
 use std::{borrow::Cow, ffi::CStr};
 
 /// The header of a CVD
-pub struct CvdHdr(*mut clamav_sys::cl_cvd);
+pub struct Header(*mut clamav_sys::cl_cvd);
 
-impl CvdMeta for CvdHdr {
+impl Meta for Header {
     /// Parse a CVD header from a buffer obtained from the beginning of a CVD
     /// (or CLD) file
-    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, CvdHeadError> {
+    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, HeadError> {
         unsafe {
             let raw = clamav_sys::cl_cvdparse(bytes.as_ptr() as *const i8);
 
             if raw.is_null() {
-                Err(CvdHeadError::Parse)
+                Err(HeadError::Parse)
             } else {
-                Ok(CvdHdr(raw))
+                Ok(Header(raw))
             }
         }
     }
@@ -59,12 +59,12 @@ impl CvdMeta for CvdHdr {
     }
 
     /// Creation time as seconds
-    fn stime(&self) -> usize {
-        unsafe { (*self.0).stime as usize }
+    fn stime(&self) -> u64 {
+        unsafe { (*self.0).stime }
     }
 }
 
-impl std::fmt::Debug for CvdHdr {
+impl std::fmt::Debug for Header {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CvdHead")
             .field("f_level", &self.f_level())

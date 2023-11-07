@@ -1,4 +1,4 @@
-use crate::{engine::ScanEvent, layer_attr::LayerAttributes, ClamError, ContentHandle};
+use crate::{engine::ScanEvent, layer_attr::LayerAttributes, ContentHandle, EngineError};
 use clamav_sys::cl_error_t;
 use std::{
     ffi::CStr,
@@ -9,7 +9,7 @@ use std::{
 /// A type defining a closure or function that, when given a recursion depth,
 /// file type, optional file name, and file size, returns whether or not the
 /// content should be duplicated into a buffer that can be passed via
-/// FileInspect messages.
+/// `FileInspect` messages.
 type ShouldCopyFileBuffer = Box<dyn for<'a> Fn(u32, &'a str, Option<&'a str>, usize) -> bool>;
 
 /// A wrapper structure around the context passed to callbacks that execute with scans
@@ -39,8 +39,9 @@ pub(crate) unsafe extern "C" fn progress(
     context: *mut c_void,
 ) -> cl_error_t {
     // All errors are handled silently as there is no other means to report errors
-    if let Some(sender) =
-        (context as *mut tokio::sync::mpsc::Sender<Progress<(), ClamError>>).as_ref()
+    if let Some(sender) = context
+        .cast::<tokio::sync::mpsc::Sender<Progress<(), EngineError>>>()
+        .as_ref()
     {
         let _ = sender.blocking_send(Progress::Update {
             total_items,
@@ -58,7 +59,7 @@ pub(crate) unsafe extern "C" fn engine_pre_scan(
     type_: *const c_char,
     context: *mut c_void,
 ) -> cl_error_t {
-    if let Some(cxt) = (context as *mut ScanCbContext).as_ref() {
+    if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
         let file_type = CStr::from_ptr(type_).to_string_lossy();
 
         let _ = cxt.sender.blocking_send(ScanEvent::PreScan {
@@ -76,7 +77,7 @@ pub(crate) unsafe extern "C" fn engine_post_scan(
     virname: *const c_char,
     context: *mut c_void,
 ) -> cl_error_t {
-    if let Some(cxt) = (context as *mut ScanCbContext).as_ref() {
+    if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
         let result = result as isize;
         let match_name = if virname.is_null() {
             String::from("<NULL>")
@@ -99,7 +100,7 @@ pub(crate) unsafe extern "C" fn engine_virus_found(
     virname: *const c_char,
     context: *mut c_void,
 ) {
-    if let Some(cxt) = (context as *mut ScanCbContext).as_ref() {
+    if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
         let name = CStr::from_ptr(virname).to_string_lossy().into();
 
         let _ = cxt.sender.blocking_send(ScanEvent::MatchFound {
@@ -116,7 +117,7 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
     type_: *const c_char,
     c_ancestors: *mut *const c_char,
     parent_file_size: usize,
-    filename: *const c_char,
+    file_name: *const c_char,
     file_size: usize,
     file_buffer: *const c_char,
     recursion_level: u32,
@@ -125,9 +126,9 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
 ) -> cl_error_t {
     // NOTE: this function is probably doing too much work generating structures
     // that won't be used.  TALOSAV-28 offers a solution.
-    if let Some(cxt) = (context as *mut ScanCbContext).as_ref() {
+    if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
         let file_type: String = CStr::from_ptr(type_).to_string_lossy().into();
-        let file_name = filename
+        let file_name = file_name
             .as_ref()
             .map(|p| CStr::from_ptr(p))
             .map(CStr::to_string_lossy)
@@ -136,20 +137,22 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
         let layer_attrs = LayerAttributes::from_bits(layer_attributes).unwrap_or_default();
 
         let mut ancestors = vec![];
-        if !c_ancestors.is_null() {
-            for i in 0..recursion_level {
-                let ancestor = *(c_ancestors.offset(i as isize));
-                if ancestor.is_null() {
-                    ancestors.push(None);
-                } else {
-                    let ancestor = CStr::from_ptr(ancestor).to_string_lossy();
-                    ancestors.push(Some(ancestor.into()));
+        if let Ok(recursion_level) = isize::try_from(recursion_level) {
+            if !c_ancestors.is_null() {
+                for i in 0..recursion_level {
+                    let ancestor = *(c_ancestors.offset(i));
+                    if ancestor.is_null() {
+                        ancestors.push(None);
+                    } else {
+                        let ancestor = CStr::from_ptr(ancestor).to_string_lossy();
+                        ancestors.push(Some(ancestor.into()));
+                    }
                 }
             }
         }
 
         // Duplicate the content buffer?
-        let mut content = None;
+        let mut scanned_content = None;
         if let Some(cb) = &cxt.should_copy_file_buffer {
             // Never include content for the root document. That should be known to the caller already.
             if cb(
@@ -159,7 +162,7 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
                 file_size,
             ) {
                 let buffer = unsafe {
-                    core::slice::from_raw_parts(file_buffer as *const c_uchar, file_size)
+                    core::slice::from_raw_parts(file_buffer.cast::<c_uchar>(), file_size)
                 }
                 .to_vec();
                 // NOTE: the content is provided as a trait object that
@@ -168,7 +171,7 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
                 // "lightweight" object, such as a file handle or socket, or
                 // perhaps a ref-counted buffer that releases its reference once
                 // completely read.
-                content = Some(Box::pin(Cursor::new(buffer)) as ContentHandle)
+                scanned_content = Some(Box::pin(Cursor::new(buffer)) as ContentHandle);
             }
         }
 
@@ -181,7 +184,7 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
             recursion_level,
             layer_attrs,
             ancestors,
-            content,
+            content: scanned_content,
         });
     }
 
@@ -192,19 +195,19 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
 fn dup_fd_to_file(fd: c_int) -> Option<std::fs::File> {
     use std::os::unix::prelude::FromRawFd;
 
-    if fd != -1 {
+    if fd == -1 {
+        None
+    } else {
         // dup the file descriptor first in case this message isn't handled
         // before it's closed.  The file will be closed when the containing
         // message is discarded.
         let new_fd = unsafe { libc::dup(fd) };
-        if new_fd != -1 {
-            Some(unsafe { std::fs::File::from_raw_fd(new_fd) })
-        } else {
+        if new_fd == -1 {
             // TODO: log a warning? Or embed error in FileInspect message?
             None
+        } else {
+            Some(unsafe { std::fs::File::from_raw_fd(new_fd) })
         }
-    } else {
-        None
     }
 }
 

@@ -101,39 +101,54 @@ pub struct ScanSettings {
 }
 
 impl ScanSettings {
+    #[must_use]
     pub fn general(&self) -> GeneralFlags {
-        GeneralFlags::from_bits(self.settings.general).unwrap()
+        GeneralFlags::from_bits(self.settings.general).unwrap_or(GeneralFlags::empty())
     }
-    pub fn set_general(&mut self, flags: GeneralFlags) {
+
+    pub fn set_general(&mut self, flags: &GeneralFlags) {
         self.settings.general = flags.bits();
     }
+
+    #[must_use]
     pub fn parse(&self) -> ParseFlags {
-        ParseFlags::from_bits(self.settings.parse).unwrap()
+        ParseFlags::from_bits(self.settings.parse).unwrap_or(ParseFlags::empty())
     }
-    pub fn set_parse(&mut self, flags: ParseFlags) {
+
+    pub fn set_parse(&mut self, flags: &ParseFlags) {
         self.settings.parse = flags.bits();
     }
+
+    #[must_use]
     pub fn heuristic(&self) -> HeuristicFlags {
-        HeuristicFlags::from_bits(self.settings.heuristic).unwrap()
+        HeuristicFlags::from_bits(self.settings.heuristic).unwrap_or(HeuristicFlags::empty())
     }
-    pub fn set_heuristic(&mut self, flags: HeuristicFlags) {
+
+    pub fn set_heuristic(&mut self, flags: &HeuristicFlags) {
         self.settings.heuristic = flags.bits();
     }
+
+    #[must_use]
     pub fn mail(&self) -> MailFlags {
-        MailFlags::from_bits(self.settings.mail).unwrap()
+        MailFlags::from_bits(self.settings.mail).unwrap_or(MailFlags::empty())
     }
-    pub fn set_mail(&mut self, flags: MailFlags) {
+
+    pub fn set_mail(&mut self, flags: &MailFlags) {
         self.settings.mail = flags.bits();
     }
+
+    #[must_use]
     pub fn dev(&self) -> DevFlags {
-        DevFlags::from_bits(self.settings.dev).unwrap()
+        DevFlags::from_bits(self.settings.dev).unwrap_or(DevFlags::empty())
     }
-    pub fn set_dev(&mut self, flags: DevFlags) {
+
+    pub fn set_dev(&mut self, flags: &DevFlags) {
         self.settings.dev = flags.bits();
     }
 }
 
 impl ToString for ScanSettings {
+    #[allow(clippy::too_many_lines)]
     fn to_string(&self) -> String {
         let mut flag_names = Vec::<String>::new();
 
@@ -265,17 +280,19 @@ impl ToString for ScanSettings {
     }
 }
 
-pub struct ScanSettingsBuilder {
+pub struct Builder {
     current: cl_scan_options,
 }
 
-impl ScanSettingsBuilder {
+impl Builder {
+    #[must_use]
     pub fn new() -> Self {
-        ScanSettingsBuilder {
+        Builder {
             current: cl_scan_options::default(),
         }
     }
 
+    #[must_use]
     pub fn build(&self) -> ScanSettings {
         ScanSettings {
             settings: self.current,
@@ -312,7 +329,7 @@ impl ScanSettingsBuilder {
         self
     }
 
-    /// Enable HTML normalisation (including ScrEnc decryption).
+    /// Enable HTML normalisation (including `ScrEnc` decryption).
     pub fn enable_html(&mut self) -> &mut Self {
         self.current.parse |= CL_SCAN_PARSE_HTML;
         self
@@ -423,7 +440,7 @@ impl ScanSettingsBuilder {
     }
 }
 
-impl Default for ScanSettingsBuilder {
+impl Default for Builder {
     fn default() -> Self {
         Self::new()
     }
@@ -435,13 +452,13 @@ mod tests {
 
     #[test]
     fn builder_defaults_to_standard_opts() {
-        let settings = ScanSettingsBuilder::new().build();
+        let settings = Builder::new().build();
         assert_eq!(settings.settings, clamav_sys::cl_scan_options::default());
     }
 
     #[test]
     fn builder_clear_success() {
-        let settings = ScanSettingsBuilder::new().clear().build();
+        let settings = Builder::new().clear().build();
         assert_eq!(settings.settings.general, 0);
         assert_eq!(settings.settings.parse, 0);
         assert_eq!(settings.settings.heuristic, 0);
@@ -451,13 +468,13 @@ mod tests {
 
     #[test]
     fn builder_just_pdf_success() {
-        let settings = ScanSettingsBuilder::new().clear().enable_pdf().build();
+        let settings = Builder::new().clear().enable_pdf().build();
         assert_eq!(settings.settings.parse, CL_SCAN_PARSE_PDF);
     }
 
     #[test]
     fn builder_normal_files_success() {
-        let settings = ScanSettingsBuilder::new()
+        let settings = Builder::new()
             .clear()
             .enable_pdf()
             .enable_html()
@@ -485,7 +502,7 @@ mod tests {
 
     #[test]
     fn settings_default_to_standard() {
-        let settings: ScanSettings = Default::default();
+        let settings: ScanSettings = ScanSettings::default();
         assert_eq!(settings.settings, cl_scan_options::default());
     }
 }

@@ -1,60 +1,55 @@
 use std::error;
 use std::ffi::CStr;
 use std::fmt;
-use std::str;
 
 use clamav_sys::cl_error_t;
 
-/// An error indicating a clam failure.
+/// An error reported directly from a libclamav function call
 #[derive(Clone, PartialEq, Eq)]
-pub struct ClamError {
+pub struct Error {
     code: cl_error_t,
 }
 
-impl ClamError {
+impl Error {
+    #[must_use]
     pub fn new(code: cl_error_t) -> Self {
-        ClamError { code }
+        Error { code }
     }
 
+    #[must_use]
     pub fn string_error(&self) -> String {
         unsafe {
             let ptr = clamav_sys::cl_strerror(self.code);
             let bytes = CStr::from_ptr(ptr).to_bytes();
-            str::from_utf8(bytes)
-                .expect("Invalid UTF8 string")
-                .to_string()
+            String::from_utf8_lossy(bytes).to_string()
         }
     }
 
-    pub fn code(&self) -> i32 {
-        self.code.0 as i32
+    #[must_use]
+    pub fn code(&self) -> u32 {
+        self.code.0
     }
 }
 
-impl From<cl_error_t> for ClamError {
+impl From<cl_error_t> for Error {
     fn from(code: cl_error_t) -> Self {
         Self::new(code)
     }
 }
 
-impl fmt::Display for ClamError {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "cl_error {}: {}",
-            self.code(),
-            self.string_error()
-        )
+        write!(f, "cl_error {}: {}", self.code(), self.string_error())
     }
 }
 
-impl fmt::Debug for ClamError {
+impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self)
+        write!(f, "{self}")
     }
 }
 
-impl error::Error for ClamError {
+impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         None
     }
@@ -66,7 +61,7 @@ mod tests {
 
     #[test]
     fn error_as_string_success() {
-        let err = ClamError::new(cl_error_t::CL_EFORMAT);
+        let err = Error::new(cl_error_t::CL_EFORMAT);
         let err_string = err.to_string();
         dbg!(&err_string);
         assert!(

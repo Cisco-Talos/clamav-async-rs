@@ -4,6 +4,11 @@ use std::str;
 use clamav_sys::cl_retdbdir;
 
 /// Gets the default database directory for clamav
+///
+/// # Panics
+///
+/// Will panic if the default directory name is not valid UTF-8
+#[must_use]
 pub fn default_directory() -> String {
     unsafe {
         let ptr = cl_retdbdir();

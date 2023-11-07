@@ -7,19 +7,19 @@ pub mod head_libclamav;
 pub mod head_native;
 
 #[cfg(not(feature = "native-impl"))]
-pub use head_libclamav::CvdHdr;
+pub use head_libclamav::Header;
 
 #[cfg(feature = "native-impl")]
-pub use head_native::CvdHdr;
+pub use head_native::Header;
 
-pub trait CvdMeta {
+pub trait Meta {
     /// Load fromm the initial bytes found at the beginning of the CVD/CLD
-    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, CvdHeadError>
+    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, HeadError>
     where
         Self: Sized;
 
     /// Obtain a CVD/CLD header from an open file
-    fn from_file(fh: &mut File) -> Result<Self, CvdHeadError>
+    fn from_file(fh: &mut File) -> Result<Self, HeadError>
     where
         Self: Sized,
     {
@@ -31,7 +31,7 @@ pub trait CvdMeta {
     }
 
     /// Obtain a CVD/CLD header from the specified path
-    fn from_path(path: &Path) -> Result<Self, CvdHeadError>
+    fn from_path(path: &Path) -> Result<Self, HeadError>
     where
         Self: Sized,
     {
@@ -60,12 +60,12 @@ pub trait CvdMeta {
     /// Database builder's ID
     fn builder(&self) -> Cow<'_, str>;
 
-    /// Creation time as seconds
-    fn stime(&self) -> usize;
+    /// Creation time as seconds since Unix epoch
+    fn stime(&self) -> u64;
 }
 
 #[derive(Debug, Error)]
-pub enum CvdHeadError {
+pub enum HeadError {
     /// Generic error from the libclamav parser.  Unfortunately, it outputs its
     /// error via a message
     #[error("unable to parse (see log output)")]

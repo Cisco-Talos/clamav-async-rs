@@ -1,7 +1,9 @@
-use crate::error::ClamError;
+use crate::error::Error as ClamError;
 use clamav_sys::cl_engine_field;
 use clamav_sys::{cl_error_t, time_t};
+use core::num;
 use derivative::Derivative;
+use std::ffi::NulError;
 use std::{path::Path, pin::Pin, sync::Arc, time};
 
 #[cfg(windows)]
@@ -27,10 +29,7 @@ pub enum ScanResult {
 }
 
 impl ScanResult {
-    pub(crate) fn from_ffi(
-        scan_result: cl_error_t,
-        c_virname: *const i8,
-    ) -> Result<Self, ClamError> {
+    pub(crate) fn from_ffi(scan_result: cl_error_t, c_virname: *const i8) -> Result<Self, Error> {
         use std::ffi::CStr;
 
         match scan_result {
@@ -41,7 +40,7 @@ impl ScanResult {
                     CStr::from_ptr(c_virname).to_string_lossy().to_string(),
                 ))
             },
-            code => Err(ClamError::new(code)),
+            code => Err(ClamError::new(code).into()),
         }
     }
 }
@@ -75,11 +74,11 @@ pub enum ScanEvent {
         parent_file_size: usize,
         recursion_level: u32,
     },
-    Result(Result<ScanResult, ClamError>),
+    Result(Result<ScanResult, Error>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum EngineValueType {
+pub enum ValueType {
     U32,
     U64,
     String,
@@ -90,17 +89,21 @@ pub enum EngineValueType {
 pub struct ClamTime(time_t);
 
 impl ClamTime {
+    #[must_use]
+    // This function can't actually panic unless ClamTime (which is a time_t) is
+    // somehow larger than a u64
+    #[allow(clippy::missing_panics_doc)]
     pub fn as_system_time(&self) -> time::SystemTime {
         if self.0 >= 0 {
-            time::UNIX_EPOCH + time::Duration::from_secs(self.0 as u64)
+            time::UNIX_EPOCH + time::Duration::from_secs(u64::try_from(self.0).unwrap())
         } else {
-            time::UNIX_EPOCH - time::Duration::from_secs(-self.0 as u64)
+            time::UNIX_EPOCH - time::Duration::from_secs(u64::try_from(-self.0).unwrap())
         }
     }
 }
 
 #[derive(Debug)]
-pub enum EngineValue {
+pub enum SettingsValue {
     U32(u32),
     U64(u64),
     String(String),
@@ -127,6 +130,22 @@ impl EngineHandle {
 // options are not changed.  These checks are enforced within this crate.
 unsafe impl Send for EngineHandle {}
 unsafe impl Sync for EngineHandle {}
+
+/// All errors that can be reported during engine configuration and execution.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("libclamav error: {0}")]
+    Clam(#[from] ClamError),
+
+    #[error("join error: {0}")]
+    Join(#[from] tokio::task::JoinError),
+
+    #[error("string provided contains embedded NUL")]
+    Nul(#[from] NulError),
+
+    #[error("unable to cast number: {0}")]
+    TryFromInt(#[from] num::TryFromIntError),
+}
 
 impl Engine {
     /// Initialises the engine
@@ -157,25 +176,25 @@ impl Engine {
         }
     }
 
-    /// Obtain a new reference to the wrapped EngineHandle.  It must still be
+    /// Obtain a new reference to the wrapped `EngineHandle`.  It must still be
     /// locked prior to use.
     fn handle(&self) -> Arc<RwLock<EngineHandle>> {
         self.handle.clone()
     }
 
-    pub async fn compile(&self) -> Result<(), ClamError> {
+    /// Compile the loaded signatures
+    pub async fn compile(&self) -> Result<(), Error> {
         let engine_handle = self.handle();
         tokio::task::spawn_blocking(move || ffi::compile(engine_handle.blocking_write().as_ptr()))
-            .await
-            .expect("join thread")
+            .await?
     }
 
-    /// An extended version of `compile()` that streams [crate::callback::Progress] events (concluding with a
-    /// [crate::callback::Progress::Result] event).
+    /// An extended version of `compile()` that streams [`crate::callback::Progress`] events (concluding with a
+    /// [`crate::callback::Progress::Result`] event).
 
-    pub async fn compile_with_progress(
+    pub fn compile_with_progress(
         &mut self,
-    ) -> tokio_stream::wrappers::ReceiverStream<crate::callback::Progress<(), ClamError>> {
+    ) -> tokio_stream::wrappers::ReceiverStream<crate::callback::Progress<(), Error>> {
         let (sender, receiver) = tokio::sync::mpsc::channel(128);
         let engine_handle = self.handle();
 
@@ -186,10 +205,10 @@ impl Engine {
             clamav_sys::cl_engine_set_clcb_engine_compile_progress(
                 engine_handle.as_ptr(),
                 Some(crate::callback::progress),
-                context as *mut libc::c_void,
+                context.cast::<libc::c_void>(),
             );
 
-            let result = ffi::compile(engine_handle.as_ptr());
+            let result = ffi::compile(engine_handle.as_ptr()).map_err(Error::from);
 
             // Clear the pointer from the libclamav engine context
             clamav_sys::cl_engine_set_clcb_engine_compile_progress(
@@ -200,15 +219,13 @@ impl Engine {
 
             // Reclaim the sender
             let sender = Box::from_raw(context);
-            sender
-                .blocking_send(crate::callback::Progress::Complete(result))
-                .expect("blocking send");
+            sender.blocking_send(crate::callback::Progress::Complete(result))
         });
 
         receiver.into()
     }
 
-    pub async fn load_databases<'a, P>(&self, dbpath: &'a P) -> Result<DatabaseStats, ClamError>
+    pub async fn load_databases<'a, P>(&self, dbpath: &'a P) -> Result<DatabaseStats, Error>
     where
         P: 'a + ?Sized + AsRef<Path>,
     {
@@ -220,15 +237,15 @@ impl Engine {
             result
         })
         .await
-        .unwrap()
+        .map_err(Error::from)?
     }
 
-    /// An extended version of `load_databases()` that streams [crate::callback::Progress] events (concluding with
-    /// a [crate::callback::Progress::Result] event).
-    pub async fn load_databases_with_progress<'a, P>(
+    /// An extended version of `load_databases()` that streams [`crate::callback::Progress`] events (concluding with
+    /// a [`crate::callback::Progress::Result`] event).
+    pub fn load_databases_with_progress<'a, P>(
         &mut self,
         dbpath: &'a P,
-    ) -> tokio_stream::wrappers::ReceiverStream<crate::callback::Progress<DatabaseStats, ClamError>>
+    ) -> tokio_stream::wrappers::ReceiverStream<crate::callback::Progress<DatabaseStats, Error>>
     where
         P: 'a + ?Sized + AsRef<Path>,
     {
@@ -243,16 +260,16 @@ impl Engine {
             clamav_sys::cl_engine_set_clcb_sigload_progress(
                 engine_handle.as_ptr(),
                 Some(crate::callback::progress),
-                context as *mut libc::c_void,
+                context.cast::<libc::c_void>(),
             );
 
-            let result = ffi::load_databases(dbpath.as_ref(), engine_handle.as_ptr());
+            let load_db_result =
+                ffi::load_databases(dbpath.as_ref(), engine_handle.as_ptr()).map_err(Error::from);
 
             // Reclaim the sender
             let sender = Box::from_raw(context);
-            sender
-                .blocking_send(crate::callback::Progress::Complete(result))
-                .expect("blocking send");
+            let final_result =
+                sender.blocking_send(crate::callback::Progress::Complete(load_db_result));
 
             // Clear the pointer from the libclamav engine context
             clamav_sys::cl_engine_set_clcb_sigload_progress(
@@ -260,17 +277,19 @@ impl Engine {
                 None,
                 std::ptr::null_mut(),
             );
+
+            final_result
         });
 
         receiver.into()
     }
 
-    pub async fn scan<T: Into<crate::fmap::Fmap>>(
+    pub fn scan<T: Into<crate::fmap::Fmap>>(
         &self,
         target: T,
         filename: Option<&str>,
         mut settings: crate::scan_settings::ScanSettings,
-    ) -> ReceiverStream<ScanEvent> {
+    ) -> Result<ReceiverStream<ScanEvent>, Error> {
         use crate::callback::ScanCbContext;
         use crate::fmap::Fmap;
         use std::ffi::CString;
@@ -280,7 +299,7 @@ impl Engine {
         let fmap: Fmap = target.into();
 
         let (sender, receiver) = tokio::sync::mpsc::channel::<ScanEvent>(128);
-        let c_filename = filename.map(|n| CString::new(n).expect("CString::new failed"));
+        let c_filename = filename.map(CString::new).transpose()?;
         let engine_handle = self.handle.clone();
         let fmap_handle = fmap.handle();
 
@@ -312,7 +331,7 @@ impl Engine {
                     ptr::null_mut(),
                     engine_handle.blocking_read().as_ptr(),
                     &mut settings.settings,
-                    c_sender as *mut c_void,
+                    c_sender.cast::<c_void>(),
                 )
             };
             // Reclaim the sender from C-land and send a final message
@@ -324,58 +343,59 @@ impl Engine {
                 .blocking_send(ScanEvent::Result(ScanResult::from_ffi(retval, c_virname)));
         });
 
-        receiver.into()
+        Ok(receiver.into())
     }
 
-    async fn get(&self, field: cl_engine_field) -> Result<EngineValue, ClamError> {
+    async fn get(&self, field: cl_engine_field) -> Result<SettingsValue, Error> {
         let engine_handle = self.handle();
         let engine_handle = engine_handle.read().await;
         ffi::get(engine_handle.as_ptr(), field)
     }
 
-    async fn set(&self, field: cl_engine_field, value: EngineValue) -> Result<(), ClamError> {
+    async fn set(&self, field: cl_engine_field, value: SettingsValue) -> Result<(), Error> {
         dbg!(&field, &value);
         let engine_handle = self.handle.write().await;
-        ffi::set(engine_handle.as_ptr(), field, value)
+        ffi::set(engine_handle.as_ptr(), field, value).map_err(Error::from)
     }
 
-    pub async fn database_version(&self) -> Result<u32, ClamError> {
-        if let EngineValue::U32(value) = self.get(cl_engine_field::CL_ENGINE_DB_VERSION).await? {
+    pub async fn database_version(&self) -> Result<u32, Error> {
+        if let SettingsValue::U32(value) = self.get(cl_engine_field::CL_ENGINE_DB_VERSION).await? {
             Ok(value)
         } else {
-            Err(ClamError::new(cl_error_t::CL_EARG))
+            Err(ClamError::new(cl_error_t::CL_EARG).into())
         }
     }
 
-    pub async fn database_timestamp(&self) -> Result<time::SystemTime, ClamError> {
-        if let EngineValue::Time(value) = self.get(cl_engine_field::CL_ENGINE_DB_TIME).await? {
+    pub async fn database_timestamp(&self) -> Result<time::SystemTime, Error> {
+        if let SettingsValue::Time(value) = self.get(cl_engine_field::CL_ENGINE_DB_TIME).await? {
             Ok(value.as_system_time())
         } else {
-            Err(ClamError::new(cl_error_t::CL_EARG))
+            Err(ClamError::new(cl_error_t::CL_EARG).into())
         }
     }
 
-    pub async fn disable_cache(&self, disable_cache: bool) -> Result<(), ClamError> {
+    pub async fn disable_cache(&self, disable_cache: bool) -> Result<(), Error> {
         self.set(
             cl_engine_field::CL_ENGINE_DISABLE_CACHE,
-            EngineValue::U32(disable_cache.into()),
+            SettingsValue::U32(disable_cache.into()),
         )
         .await
     }
 
-    pub async fn set_max_scansize(&self, max_scansize: u64) -> Result<(), ClamError> {
+    pub async fn set_max_scansize(&self, max_scansize: u64) -> Result<(), Error> {
         self.set(
             cl_engine_field::CL_ENGINE_MAX_SCANSIZE,
-            EngineValue::U64(max_scansize),
+            SettingsValue::U64(max_scansize),
         )
         .await
     }
 
-    pub async fn max_scansize(&self) -> Result<u64, ClamError> {
-        if let EngineValue::U64(value) = self.get(cl_engine_field::CL_ENGINE_MAX_SCANSIZE).await? {
+    pub async fn max_scansize(&self) -> Result<u64, Error> {
+        if let SettingsValue::U64(value) = self.get(cl_engine_field::CL_ENGINE_MAX_SCANSIZE).await?
+        {
             Ok(value)
         } else {
-            Err(ClamError::new(cl_error_t::CL_EARG))
+            Err(ClamError::new(cl_error_t::CL_EARG).into())
         }
     }
 }
@@ -395,8 +415,7 @@ impl Drop for EngineHandle {
 }
 
 mod ffi {
-    use super::{ClamTime, DatabaseStats, EngineValue, EngineValueType};
-    use crate::ClamError;
+    use super::{ClamError, ClamTime, DatabaseStats, Error, SettingsValue, ValueType};
     use clamav_sys::{
         cl_engine_field, cl_engine_get_num, cl_engine_get_str, cl_engine_set_num,
         cl_engine_set_str, cl_error_t, cl_load, time_t, CL_DB_STDOPT,
@@ -408,12 +427,12 @@ mod ffi {
         path::Path,
     };
 
-    pub(super) fn compile(handle: *mut clamav_sys::cl_engine) -> Result<(), ClamError> {
+    pub(super) fn compile(handle: *mut clamav_sys::cl_engine) -> Result<(), Error> {
         unsafe {
             let result = clamav_sys::cl_engine_compile(handle);
             match result {
                 cl_error_t::CL_SUCCESS => Ok(()),
-                _ => Err(ClamError::new(result)),
+                _ => Err(ClamError::new(result).into()),
             }
         }
     }
@@ -421,7 +440,7 @@ mod ffi {
     pub(super) fn load_databases(
         dbpath: &Path,
         handle: *mut clamav_sys::cl_engine,
-    ) -> Result<DatabaseStats, ClamError> {
+    ) -> Result<DatabaseStats, Error> {
         let raw_path = CString::new(dbpath.as_os_str().as_bytes()).unwrap();
         unsafe {
             let mut signature_count: u32 = 0;
@@ -433,7 +452,7 @@ mod ffi {
             );
             match result {
                 cl_error_t::CL_SUCCESS => Ok(DatabaseStats { signature_count }),
-                _ => Err(ClamError::new(result)),
+                _ => Err(ClamError::new(result).into()),
             }
         }
     }
@@ -441,45 +460,48 @@ mod ffi {
     pub(super) fn get(
         engine_handle: *mut clamav_sys::cl_engine,
         field: cl_engine_field,
-    ) -> Result<EngineValue, ClamError> {
+    ) -> Result<SettingsValue, Error> {
         unsafe {
             match get_field_type(field) {
-                EngineValueType::U32 => {
+                ValueType::U32 => {
                     let mut err: c_int = 0;
-                    let value = cl_engine_get_num(engine_handle, field, &mut err) as u32;
-                    if err != 0 {
-                        Err(ClamError::new(mem::transmute(err)))
+                    let value: u32 =
+                        cl_engine_get_num(engine_handle, field, &mut err).try_into()?;
+                    if err == 0 {
+                        Ok(SettingsValue::U32(value))
                     } else {
-                        Ok(EngineValue::U32(value))
+                        Err(ClamError::new(mem::transmute(err)).into())
                     }
                 }
-                EngineValueType::U64 => {
+                ValueType::U64 => {
                     let mut err: c_int = 0;
-                    let value = cl_engine_get_num(engine_handle, field, &mut err) as u64;
-                    if err != 0 {
-                        Err(ClamError::new(mem::transmute(err)))
+                    let value = cl_engine_get_num(engine_handle, field, &mut err)
+                        .try_into()
+                        .expect("cast i64 to u64");
+                    if err == 0 {
+                        Ok(SettingsValue::U64(value))
                     } else {
-                        Ok(EngineValue::U64(value))
+                        Err(ClamError::new(mem::transmute(err)).into())
                     }
                 }
-                EngineValueType::String => {
+                ValueType::String => {
                     let mut err = 0;
                     let value = cl_engine_get_str(engine_handle, field, &mut err);
-                    if err != 0 {
-                        Err(ClamError::new(mem::transmute(err)))
-                    } else {
-                        Ok(EngineValue::String(
+                    if err == 0 {
+                        Ok(SettingsValue::String(
                             CStr::from_ptr(value).to_str().unwrap().to_string(),
                         ))
+                    } else {
+                        Err(ClamError::new(mem::transmute(err)).into())
                     }
                 }
-                EngineValueType::Time => {
+                ValueType::Time => {
                     let mut err = 0;
                     let value = cl_engine_get_num(engine_handle, field, &mut err) as time_t;
-                    if err != 0 {
-                        Err(ClamError::new(mem::transmute(err)))
+                    if err == 0 {
+                        Ok(SettingsValue::Time(ClamTime(value)))
                     } else {
-                        Ok(EngineValue::Time(ClamTime(value)))
+                        Err(ClamError::new(mem::transmute(err)).into())
                     }
                 }
             }
@@ -489,97 +511,107 @@ mod ffi {
     pub(super) fn set(
         engine_handle: *mut clamav_sys::cl_engine,
         field: cl_engine_field,
-        value: EngineValue,
-    ) -> Result<(), ClamError> {
+        value: SettingsValue,
+    ) -> Result<(), Error> {
         let expected_type = get_field_type(field);
         let actual_type = match &value {
-            EngineValue::U32(_) => EngineValueType::U32,
-            EngineValue::U64(_) => EngineValueType::U64,
-            EngineValue::String(_) => EngineValueType::String,
-            EngineValue::Time(_) => EngineValueType::Time,
+            SettingsValue::U32(_) => ValueType::U32,
+            SettingsValue::U64(_) => ValueType::U64,
+            SettingsValue::String(_) => ValueType::String,
+            SettingsValue::Time(_) => ValueType::Time,
         };
 
         if expected_type != actual_type {
-            return Err(ClamError::new(cl_error_t::CL_EARG));
+            return Err(ClamError::new(cl_error_t::CL_EARG).into());
         }
 
         unsafe {
             match value {
-                EngineValue::U32(val) => {
-                    let err = cl_engine_set_num(engine_handle, field, val as i64);
-                    if err != cl_error_t::CL_SUCCESS {
-                        Err(ClamError::new(err))
-                    } else {
+                SettingsValue::U32(val) => {
+                    let err = cl_engine_set_num(
+                        engine_handle,
+                        field,
+                        val.try_into().expect("cast u32 to i64"),
+                    );
+                    if err == cl_error_t::CL_SUCCESS {
                         Ok(())
+                    } else {
+                        Err(ClamError::new(err).into())
                     }
                 }
-                EngineValue::U64(val) => {
-                    let err = cl_engine_set_num(engine_handle, field, val as i64);
-                    if err != cl_error_t::CL_SUCCESS {
-                        Err(ClamError::new(err))
-                    } else {
+                SettingsValue::U64(val) => {
+                    let err = cl_engine_set_num(
+                        engine_handle,
+                        field,
+                        val.try_into().expect("cast u64 to i64"),
+                    );
+                    if err == cl_error_t::CL_SUCCESS {
                         Ok(())
+                    } else {
+                        Err(ClamError::new(err).into())
                     }
                 }
-                EngineValue::String(val) => {
+                SettingsValue::String(val) => {
                     let val = CString::new(val).unwrap();
                     let err = cl_engine_set_str(engine_handle, field, val.as_ptr());
-                    if err != cl_error_t::CL_SUCCESS {
-                        Err(ClamError::new(err))
-                    } else {
+                    if err == cl_error_t::CL_SUCCESS {
                         Ok(())
+                    } else {
+                        Err(ClamError::new(err).into())
                     }
                 }
-                EngineValue::Time(ClamTime(val)) => {
+                SettingsValue::Time(ClamTime(val)) => {
                     let err = cl_engine_set_num(engine_handle, field, val);
-                    if err != cl_error_t::CL_SUCCESS {
-                        Err(ClamError::new(err))
-                    } else {
+                    if err == cl_error_t::CL_SUCCESS {
                         Ok(())
+                    } else {
+                        Err(ClamError::new(err).into())
                     }
                 }
             }
         }
     }
 
-    fn get_field_type(field: cl_engine_field) -> EngineValueType {
+    fn get_field_type(field: cl_engine_field) -> ValueType {
         match field {
-            cl_engine_field::CL_ENGINE_MAX_SCANSIZE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_FILESIZE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_RECURSION => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_FILES => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MIN_CC_COUNT => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MIN_SSN_COUNT => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_PUA_CATEGORIES => EngineValueType::String,
-            cl_engine_field::CL_ENGINE_DB_OPTIONS => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_DB_VERSION => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_DB_TIME => EngineValueType::Time,
-            cl_engine_field::CL_ENGINE_AC_ONLY => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_AC_MINDEPTH => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_AC_MAXDEPTH => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_TMPDIR => EngineValueType::String,
-            cl_engine_field::CL_ENGINE_KEEPTMP => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_BYTECODE_SECURITY => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_BYTECODE_TIMEOUT => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_BYTECODE_MODE => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_EMBEDDEDPE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_HTMLNORMALIZE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_HTMLNOTAGS => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_SCRIPTNORMALIZE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_MAX_ZIPTYPERCG => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_FORCETODISK => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_DISABLE_CACHE => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_DISABLE_PE_STATS => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_STATS_TIMEOUT => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_PARTITIONS => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_ICONSPE => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_RECHWP3 => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_MAX_SCANTIME => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_PCRE_MATCH_LIMIT => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_PCRE_RECMATCH_LIMIT => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_PCRE_MAX_FILESIZE => EngineValueType::U64,
-            cl_engine_field::CL_ENGINE_DISABLE_PE_CERTS => EngineValueType::U32,
-            cl_engine_field::CL_ENGINE_PE_DUMPCERTS => EngineValueType::U32,
+            cl_engine_field::CL_ENGINE_MAX_SCANSIZE | cl_engine_field::CL_ENGINE_MAX_FILESIZE => {
+                ValueType::U64
+            }
+            cl_engine_field::CL_ENGINE_PUA_CATEGORIES | cl_engine_field::CL_ENGINE_TMPDIR => {
+                ValueType::String
+            }
+            cl_engine_field::CL_ENGINE_DB_TIME => ValueType::Time,
+            cl_engine_field::CL_ENGINE_MAX_RECURSION
+            | cl_engine_field::CL_ENGINE_MAX_FILES
+            | cl_engine_field::CL_ENGINE_MIN_CC_COUNT
+            | cl_engine_field::CL_ENGINE_MIN_SSN_COUNT
+            | cl_engine_field::CL_ENGINE_DB_OPTIONS
+            | cl_engine_field::CL_ENGINE_DB_VERSION
+            | cl_engine_field::CL_ENGINE_AC_ONLY
+            | cl_engine_field::CL_ENGINE_AC_MINDEPTH
+            | cl_engine_field::CL_ENGINE_AC_MAXDEPTH
+            | cl_engine_field::CL_ENGINE_KEEPTMP
+            | cl_engine_field::CL_ENGINE_BYTECODE_SECURITY
+            | cl_engine_field::CL_ENGINE_BYTECODE_TIMEOUT
+            | cl_engine_field::CL_ENGINE_BYTECODE_MODE
+            | cl_engine_field::CL_ENGINE_DISABLE_PE_CERTS
+            | cl_engine_field::CL_ENGINE_PE_DUMPCERTS
+            | cl_engine_field::CL_ENGINE_FORCETODISK
+            | cl_engine_field::CL_ENGINE_DISABLE_CACHE
+            | cl_engine_field::CL_ENGINE_DISABLE_PE_STATS
+            | cl_engine_field::CL_ENGINE_STATS_TIMEOUT
+            | cl_engine_field::CL_ENGINE_MAX_PARTITIONS
+            | cl_engine_field::CL_ENGINE_MAX_ICONSPE
+            | cl_engine_field::CL_ENGINE_MAX_RECHWP3
+            | cl_engine_field::CL_ENGINE_MAX_SCANTIME => ValueType::U32,
+            cl_engine_field::CL_ENGINE_MAX_EMBEDDEDPE
+            | cl_engine_field::CL_ENGINE_MAX_HTMLNORMALIZE
+            | cl_engine_field::CL_ENGINE_MAX_HTMLNOTAGS
+            | cl_engine_field::CL_ENGINE_MAX_SCRIPTNORMALIZE
+            | cl_engine_field::CL_ENGINE_MAX_ZIPTYPERCG
+            | cl_engine_field::CL_ENGINE_PCRE_MATCH_LIMIT
+            | cl_engine_field::CL_ENGINE_PCRE_RECMATCH_LIMIT
+            | cl_engine_field::CL_ENGINE_PCRE_MAX_FILESIZE => ValueType::U64,
             field => panic!("{field:?} not yet supported"),
         }
     }

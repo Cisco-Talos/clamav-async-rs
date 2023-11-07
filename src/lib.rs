@@ -1,3 +1,6 @@
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::missing_errors_doc)]
+
 /// Callback support structures and support functions
 pub mod callback;
 pub mod db;
@@ -16,7 +19,8 @@ pub mod cvd;
 pub mod windows_fd;
 
 use clamav_sys::{cl_error_t, cl_init, cl_initialize_crypto};
-pub use error::ClamError;
+pub use engine::Error as EngineError;
+pub use error::Error as ClamError;
 use lazy_static::lazy_static;
 use std::{
     ffi::CStr,
@@ -38,6 +42,12 @@ pub fn initialize() -> Result<(), ClamError> {
     static ONCE: Once = Once::new();
     static mut RESULT: cl_error_t = cl_error_t::CL_SUCCESS;
     unsafe {
+        extern "C" fn cleanup() {
+            unsafe {
+                clamav_sys::cl_cleanup_crypto();
+            }
+        }
+
         ONCE.call_once(|| {
             RESULT = cl_init(clamav_sys::CL_INIT_DEFAULT);
             // this function always returns OK
@@ -47,12 +57,6 @@ pub fn initialize() -> Result<(), ClamError> {
             }
         });
 
-        extern "C" fn cleanup() {
-            unsafe {
-                clamav_sys::cl_cleanup_crypto();
-            }
-        }
-
         match RESULT {
             cl_error_t::CL_SUCCESS => Ok(()),
             _ => Err(ClamError::new(RESULT)),
@@ -60,10 +64,11 @@ pub fn initialize() -> Result<(), ClamError> {
     }
 }
 
+#[must_use]
 pub fn version() -> String {
     let ver = unsafe { clamav_sys::cl_retver() };
     if ver.is_null() {
-        "".to_string()
+        String::new()
     } else {
         unsafe { std::ffi::CStr::from_ptr(ver).to_string_lossy().to_string() }
     }
@@ -75,6 +80,7 @@ pub type MsgCallback = Box<dyn Fn(log::Level, &str, &str) + Send>;
 /// console
 ///
 /// Note that the libclamav APIs do not permit restoring the default handler.
+#[allow(clippy::missing_panics_doc)]
 pub fn set_msg_callback(cb: MsgCallback) {
     unsafe {
         *(CLAMAV_MESSAGE_CALLBACK.lock().unwrap()) = Some(cb);
@@ -113,7 +119,7 @@ unsafe extern "C" fn clcb_msg_wrapper(
     }
 }
 
-/// A type defining the trait object returned in the FileInspect event that
+/// A type defining the trait object returned in the `FileInspect` event that
 /// allows access to embedded file content.
 pub type ContentHandle = Pin<Box<dyn AsyncRead + Send>>;
 
@@ -136,14 +142,14 @@ mod tests {
     async fn clcb_msg_override() {
         const KEY: &str = module_path!();
 
-        {
-            let mut test_store = TEST_STORE.lock().unwrap();
-            (*test_store).insert(KEY.into(), "".into());
-        }
-
         fn cb(_severity: log::Level, _fullmsg: &str, msg: &str) {
             let mut test_store = TEST_STORE.lock().unwrap();
             (*test_store).insert(KEY.into(), msg.into());
+        }
+
+        {
+            let mut test_store = TEST_STORE.lock().unwrap();
+            (*test_store).insert(KEY.into(), String::default());
         }
 
         // Override the message callback
@@ -151,9 +157,10 @@ mod tests {
 
         // Force an error
         let clam_engine = crate::engine::Engine::new();
-        if clam_engine.load_databases("/no-such-path").await.is_ok() {
-            panic!("database load should have failed")
-        }
+        assert!(
+            clam_engine.load_databases("/no-such-path").await.is_err(),
+            "database load should have failed"
+        );
 
         // Check that the message callback captured the error
         let test_store = TEST_STORE.lock().unwrap();

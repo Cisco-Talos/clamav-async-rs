@@ -1,4 +1,4 @@
-use super::{CvdHeadError, CvdMeta};
+use super::{HeadError, Meta};
 use std::{
     borrow::Cow,
     str::{self, FromStr},
@@ -15,7 +15,7 @@ const CVD_TIMESTAMP_FMT: &[time::format_description::FormatItem] = time::macros:
     "[day padding:zero] [month repr:short] [year] [hour]:[minute] [offset_hour][offset_minute]"
 );
 
-pub struct CvdHdr {
+pub struct Header {
     version: usize,
     n_sigs: usize,
     f_level: usize,
@@ -27,44 +27,43 @@ pub struct CvdHdr {
     md5_str: String,
 }
 
-impl CvdMeta for CvdHdr {
-    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, CvdHeadError>
+impl Meta for Header {
+    fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, HeadError>
     where
         Self: std::marker::Sized,
     {
         let mut fields = bytes
             .strip_prefix(CVD_HEAD_MAGIC)
-            .ok_or(CvdHeadError::BadMagic)?
+            .ok_or(HeadError::BadMagic)?
             .split(|b| *b == b':');
         let creation_time_str = fields
             .next()
             .map(str::from_utf8)
             .transpose()?
-            .ok_or(CvdHeadError::MissingCreationTime)?;
+            .ok_or(HeadError::MissingCreationTime)?;
         let version = fields
             .next()
             .map(str::from_utf8)
             .transpose()?
-            .ok_or(CvdHeadError::MissingVersion)?
+            .ok_or(HeadError::MissingVersion)?
             .parse()?;
         let n_sigs: usize = fields
             .next()
             .map(str::from_utf8)
             .transpose()?
-            .ok_or(CvdHeadError::MissingNumberOfSigs)?
+            .ok_or(HeadError::MissingNumberOfSigs)?
             .parse()?;
         let f_level: usize =
-            str::from_utf8(fields.next().ok_or(CvdHeadError::MissingFLevel)?)?.parse()?;
+            str::from_utf8(fields.next().ok_or(HeadError::MissingFLevel)?)?.parse()?;
         // Just preserve this verbatim.
         let md5_str = fields
             .next()
             .map(str::from_utf8)
             .transpose()?
-            .ok_or(CvdHeadError::MissingMd5)?
+            .ok_or(HeadError::MissingMd5)?
             .into();
-        let dsig = str::from_utf8(fields.next().ok_or(CvdHeadError::MissingDSig)?)?.into();
-        let builder =
-            std::str::from_utf8(fields.next().ok_or(CvdHeadError::MissingBuilder)?)?.into();
+        let dsig = str::from_utf8(fields.next().ok_or(HeadError::MissingDSig)?)?.into();
+        let builder = std::str::from_utf8(fields.next().ok_or(HeadError::MissingBuilder)?)?.into();
 
         // This field is not present in older signature database files.  It
         // should be the last field (and will be padded out with spaces at the
@@ -85,29 +84,31 @@ impl CvdMeta for CvdHdr {
             .transpose()?
             .map(|stime| UNIX_EPOCH.checked_add(Duration::from_secs(stime as u64)))
             // ...and check that that worked
-            .ok_or(CvdHeadError::STimeTooLarge)?
+            .ok_or(HeadError::STimeTooLarge)?
             // It's there, so this isn't an old DB
-            .map(|stime| Ok((stime, false)))
-            // Or it wasn't there, so this *is* an old DB
-            .unwrap_or_else(|| {
-                // Parse the string version, e.g.: "16 Sep 2021 08:32 -0400"
-                // Oddly, there are no seconds.  So this is very much a custom format
-                time::OffsetDateTime::parse(creation_time_str, CVD_TIMESTAMP_FMT)
-                    // And mark this as old-format
-                    .map(|odt| (odt.into(), true))
-            })?;
+            .map_or_else(
+                // It wasn't there, so this *is* an old DB
+                || {
+                    // Parse the string version, e.g.: "16 Sep 2021 08:32 -0400"
+                    // Oddly, there are no seconds.  So this is very much a custom format
+                    time::OffsetDateTime::parse(creation_time_str, CVD_TIMESTAMP_FMT)
+                        // And mark this as old-format
+                        .map(|odt| (odt.into(), true))
+                },
+                |stime| Ok((stime, false)),
+            )?;
 
         let ctime_str = time::OffsetDateTime::from(ctime)
             .format(CVD_TIMESTAMP_FMT)
             .expect("format timestamp");
 
         Ok(Self {
-            ctime,
             version,
             n_sigs,
             f_level,
             dsig,
             builder,
+            ctime,
             is_old_db,
             ctime_str,
             md5_str,
@@ -143,16 +144,17 @@ impl CvdMeta for CvdHdr {
         std::borrow::Cow::from(&self.builder)
     }
 
-    fn stime(&self) -> usize {
+    fn stime(&self) -> u64 {
         self.ctime
             .duration_since(UNIX_EPOCH)
             .expect("compute seconds since epoch")
-            .as_secs() as usize
+            .as_secs()
     }
 }
 
-impl CvdHdr {
+impl Header {
     /// Whether or not this is an old-format DB (no stime field in header)
+    #[must_use]
     pub fn is_old_db(&self) -> bool {
         self.is_old_db
     }

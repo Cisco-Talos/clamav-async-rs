@@ -25,43 +25,25 @@ use bindings::Windows::{
 };
 use clamav_sys::{cl_fmap_close, cl_fmap_open_handle, cl_fmap_open_memory, cl_fmap_t};
 use std::{
-    error, fmt,
     fs::File,
+    num::TryFromIntError,
     os::{self, raw::c_void, unix::prelude::AsRawFd},
-    result,
     sync::Arc,
 };
 
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone)]
-pub struct MapError;
+#[derive(Debug, thiserror::Error)]
+pub enum MapError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
-impl fmt::Display for MapError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Failed to open mapping")
-    }
+    #[error("source consumed")]
+    Consumed,
+
+    #[error("converting integer: {0}")]
+    TryFromInt(#[from] TryFromIntError),
 }
-
-impl error::Error for MapError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        None
-    }
-}
-
-impl MapError {
-    pub fn new() -> MapError {
-        MapError {}
-    }
-}
-
-impl Default for MapError {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub type Result<T> = result::Result<T, MapError>;
 
 #[cfg(windows)]
 extern "C" fn cl_pread(
@@ -110,29 +92,29 @@ extern "C" fn cl_pread(
     }
 }
 
-/// A safer abstraction around ClamAV's cl_fmap_t.
+/// A safer abstraction around `ClamAV`'s `cl_fmap_t`.
 #[derive(Clone)]
 pub struct Fmap {
     handle: Arc<Mutex<FmapHandle>>,
 }
 
 pub(crate) struct FmapHandle {
-    source: Option<FmapSource>,
+    source: Option<Source>,
     pub(crate) fmap: *mut cl_fmap_t,
 }
 
-pub enum FmapSource {
+pub enum Source {
     Vec(Vec<u8>),
     File(std::fs::File),
 }
 
 impl From<Vec<u8>> for Fmap {
     fn from(vec: Vec<u8>) -> Self {
-        let fmap = unsafe { cl_fmap_open_memory(vec.as_ptr() as *const c_void, vec.len()) };
+        let fmap = unsafe { cl_fmap_open_memory(vec.as_ptr().cast::<c_void>(), vec.len()) };
 
         Self {
             handle: Arc::new(Mutex::new(FmapHandle {
-                source: Some(FmapSource::Vec(vec)),
+                source: Some(Source::Vec(vec)),
                 fmap,
             })),
         }
@@ -140,13 +122,13 @@ impl From<Vec<u8>> for Fmap {
 }
 
 impl TryFrom<File> for Fmap {
-    type Error = std::io::Error;
+    type Error = MapError;
 
     fn try_from(file: File) -> std::result::Result<Self, Self::Error> {
         let offset = 0;
         let len = file.metadata()?.len();
         let aging = true;
-        Ok(Self::from_file(file, offset, len as usize, aging))
+        Ok(Self::from_file(file, offset, len.try_into()?, aging))
     }
 }
 
@@ -162,7 +144,7 @@ impl Fmap {
         Self {
             handle: Arc::new(Mutex::new(FmapHandle {
                 fmap,
-                source: Some(FmapSource::File(file)),
+                source: Some(Source::File(file)),
             })),
         }
     }
@@ -173,9 +155,9 @@ impl Fmap {
 
     /// Reclaim the underlying structure from which the Fmap was created
 
-    pub async fn into_inner(self) -> FmapSource {
+    pub async fn into_inner(self) -> Result<Source, MapError> {
         let mut handle = self.handle.lock().await;
-        handle.source.take().unwrap()
+        handle.source.take().ok_or(MapError::Consumed)
     }
 }
 

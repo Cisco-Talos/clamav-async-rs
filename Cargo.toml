@@ -38,7 +38,7 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tokio-stream = { version = "0.1" }
 
 [dependencies.clamav-sys]
-path = "../clamav-sys"
+git = "https://github.com/Cisco-Talos/clamav-sys.git"
 
 [target.'cfg(windows)'.dependencies]
 bindings = { version = "0.5.5", package = "clamav-rs-bindings" }
