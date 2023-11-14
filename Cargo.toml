@@ -8,10 +8,10 @@ categories = ["api-bindings"]
 description = "Async ClamAV bindings for Rust"
 edition = "2021"
 exclude = ["test_data/*"]
-homepage = "https://github.com/zaddach/clamav-rs"
+homepage = "https://github.com/Cisco-Talos/clamav-async-rs"
 license = "GPL-2.0"
 name = "clamav-async"
-repository = "https://github.com/zaddach/clamav-rs"
+repository = "https://github.com/Cisco-Talos/clamav-async-rs"
 version = "0.5.5"
 
 [features]
@@ -36,9 +36,7 @@ time = { version = "0.3", features = [
 ] }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tokio-stream = { version = "0.1" }
-
-[dependencies.clamav-sys]
-git = "https://github.com/Cisco-Talos/clamav-sys.git"
+clamav-sys = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 bindings = { version = "0.5.5", package = "clamav-rs-bindings" }
