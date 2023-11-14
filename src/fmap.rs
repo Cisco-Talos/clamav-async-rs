@@ -1,5 +1,4 @@
-//
-// Copyright (C) 2020 Jonas Zaddach.
+// Copyright (C) 2020-2023 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
 //
 // This program is free software; you can redistribute it and/or modify
 // it under the terms of the GNU General Public License version 2 as
@@ -14,7 +13,6 @@
 // along with this program; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
 // MA 02110-1301, USA.
-//
 
 #[cfg(windows)]
 use bindings::Windows::{
