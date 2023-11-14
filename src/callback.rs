@@ -140,8 +140,6 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
     layer_attributes: u32,
     context: *mut c_void,
 ) -> cl_error_t {
-    // NOTE: this function is probably doing too much work generating structures
-    // that won't be used.  TALOSAV-28 offers a solution.
     if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
         let file_type: String = CStr::from_ptr(type_).to_string_lossy().into();
         let file_name = file_name
