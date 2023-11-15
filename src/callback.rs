@@ -20,7 +20,9 @@ use std::{
     ffi::CStr,
     io::Cursor,
     os::raw::{c_char, c_int, c_uchar, c_void},
+    pin::Pin,
 };
+use tokio::io::AsyncRead;
 
 /// A type defining a closure or function that, when given a recursion depth,
 /// file type, optional file name, and file size, returns whether or not the
@@ -32,6 +34,44 @@ type ShouldCopyFileBuffer = Box<dyn for<'a> Fn(u32, &'a str, Option<&'a str>, us
 pub(crate) struct ScanCbContext {
     pub(crate) sender: tokio::sync::mpsc::Sender<ScanEvent>,
     pub(crate) should_copy_file_buffer: Option<ShouldCopyFileBuffer>,
+}
+
+impl ScanCbContext {
+    /// Return a copy of a provided buffer if callback criteria are met
+    unsafe fn scanned_content(
+        &self,
+        file_buffer: *const c_char,
+        recursion_level: u32,
+        file_type: &str,
+        file_name: Option<&str>,
+        file_size: usize,
+    ) -> Option<Pin<Box<dyn AsyncRead + Send>>> {
+        let Some(buffer) = file_buffer
+            .cast::<c_uchar>()
+            .as_ref()
+            .map(|buf| core::slice::from_raw_parts(buf, file_size))
+        else {
+            // No buffer provided
+            return None;
+        };
+
+        let Some(cb) = &self.should_copy_file_buffer else {
+            return None;
+        };
+
+        // Never include content for the root document. That should be known to the caller already.
+        if cb(recursion_level, file_type, file_name, file_size) {
+            // NOTE: the content is provided as a trait object that
+            // implements AsyncRead in order to facilitate future
+            // functionality where this could be passed as a more
+            // "lightweight" object, such as a file handle or socket, or
+            // perhaps a ref-counted buffer that releases its reference once
+            // completely read.
+            Some(Box::pin(Cursor::new(buffer.to_vec())) as ContentHandle)
+        } else {
+            None
+        }
+    }
 }
 
 /// A completion progress report, with a final result
@@ -128,9 +168,9 @@ pub(crate) unsafe extern "C" fn engine_virus_found(
 
 pub(crate) unsafe extern "C" fn engine_file_inspection(
     // NOTE: this file descriptor is unsafe to use after the callback has
-    // returned, even if dup'd
+    // returned, even if dup'd. Hence, it's just ignored.
     _fd: c_int,
-    type_: *const c_char,
+    file_type: *const c_char,
     c_ancestors: *mut *const c_char,
     parent_file_size: usize,
     file_name: *const c_char,
@@ -140,68 +180,70 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
     layer_attributes: u32,
     context: *mut c_void,
 ) -> cl_error_t {
-    if let Some(cxt) = context.cast::<ScanCbContext>().as_ref() {
-        let file_type: String = CStr::from_ptr(type_).to_string_lossy().into();
-        let file_name = file_name
-            .as_ref()
-            .map(|p| CStr::from_ptr(p))
-            .map(CStr::to_string_lossy)
-            .map(|s| s.to_string());
+    let Some(cxt) = context.cast::<ScanCbContext>().as_ref() else {
+        return cl_error_t::CL_CLEAN;
+    };
 
-        let layer_attrs = LayerAttributes::from_bits(layer_attributes).unwrap_or_default();
+    let Some(file_type) = file_type
+        .as_ref()
+        .map(|p| CStr::from_ptr(p))
+        .map(CStr::to_string_lossy)
+        .map(|s| s.to_string())
+    else {
+        // Quietly ignore NULL file types for safety, even though libclamav
+        // guarantees us one.
+        return cl_error_t::CL_CLEAN;
+    };
 
-        let mut ancestors = vec![];
-        if let Ok(recursion_level) = isize::try_from(recursion_level) {
-            if !c_ancestors.is_null() {
-                for i in 0..recursion_level {
-                    let ancestor = *(c_ancestors.offset(i));
-                    if ancestor.is_null() {
-                        ancestors.push(None);
-                    } else {
-                        let ancestor = CStr::from_ptr(ancestor).to_string_lossy();
-                        ancestors.push(Some(ancestor.into()));
-                    }
-                }
-            }
-        }
+    let file_name = file_name
+        .as_ref()
+        .map(|ptr| CStr::from_ptr(ptr))
+        .map(CStr::to_string_lossy)
+        .map(|s| s.to_string());
 
-        // Duplicate the content buffer?
-        let mut scanned_content = None;
-        if let Some(cb) = &cxt.should_copy_file_buffer {
-            // Never include content for the root document. That should be known to the caller already.
-            if cb(
-                recursion_level,
-                file_type.as_str(),
-                file_name.as_deref(),
-                file_size,
-            ) {
-                let buffer = unsafe {
-                    core::slice::from_raw_parts(file_buffer.cast::<c_uchar>(), file_size)
-                }
-                .to_vec();
-                // NOTE: the content is provided as a trait object that
-                // implements AsyncRead in order to facilitate future
-                // functionality where this could be passed as a more
-                // "lightweight" object, such as a file handle or socket, or
-                // perhaps a ref-counted buffer that releases its reference once
-                // completely read.
-                scanned_content = Some(Box::pin(Cursor::new(buffer)) as ContentHandle);
-            }
-        }
+    let scanned_content = cxt.scanned_content(
+        file_buffer,
+        recursion_level,
+        &file_type,
+        file_name.as_deref(),
+        file_size,
+    );
 
-        let _ = cxt.sender.blocking_send(ScanEvent::FileInspect {
-            file_type,
-            file_name,
-            file_size,
-            parent_file_size,
-            recursion_level,
-            layer_attrs,
-            ancestors,
-            content: scanned_content,
-        });
-    }
+    let _ = cxt.sender.blocking_send(ScanEvent::FileInspect {
+        content: scanned_content,
+        ancestors: build_ancestors(recursion_level, c_ancestors),
+        file_name,
+        file_size,
+        file_type,
+        layer_attrs: LayerAttributes::from_bits(layer_attributes).unwrap_or_default(),
+        parent_file_size,
+        recursion_level,
+    });
 
     cl_error_t::CL_CLEAN
+}
+
+/// Helper function for `engine_file_inspection` that builds a vector laying out
+/// the filenames of ancestors for a container element
+unsafe fn build_ancestors(
+    recursion_level: u32,
+    c_ancestors: *mut *const c_char,
+) -> Vec<Option<String>> {
+    let mut ancestors = vec![];
+    if let Ok(recursion_level) = isize::try_from(recursion_level) {
+        if !c_ancestors.is_null() {
+            for i in 0..recursion_level {
+                let ancestor = *(c_ancestors.offset(i));
+                if ancestor.is_null() {
+                    ancestors.push(None);
+                } else {
+                    let ancestor = CStr::from_ptr(ancestor).to_string_lossy();
+                    ancestors.push(Some(ancestor.into()));
+                }
+            }
+        }
+    }
+    ancestors
 }
 
 #[cfg(unix)]
