@@ -78,7 +78,6 @@ pub enum ScanEvent {
         match_name: String,
     },
     FileInspect {
-        #[cfg(unix)]
         ancestors: Vec<Option<String>>,
         file_name: Option<String>,
         file_size: usize,

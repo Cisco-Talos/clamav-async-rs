@@ -190,7 +190,6 @@ pub(crate) unsafe extern "C" fn engine_file_inspection(
         }
 
         let _ = cxt.sender.blocking_send(ScanEvent::FileInspect {
-            #[cfg(unix)]
             file_type,
             file_name,
             file_size,
