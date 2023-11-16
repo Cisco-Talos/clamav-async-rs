@@ -1,8 +1,8 @@
 [package]
 authors = [
-  "Jonas Zaddach <jonas.zaddach@gmail.com",
-  "Zachary Sims <zac@icebergdefender.com>",
   "Scott Hutton <schutton@cisco.com>",
+  "Zachary Sims <zac@icebergdefender.com>",
+  "Jonas Zaddach <jzaddach@cisco.com>",
 ]
 categories = ["api-bindings"]
 description = "Async ClamAV bindings for Rust"
@@ -12,7 +12,7 @@ homepage = "https://github.com/Cisco-Talos/clamav-async-rs"
 license = "GPL-2.0"
 name = "clamav-async"
 repository = "https://github.com/Cisco-Talos/clamav-async-rs"
-version = "0.5.5"
+version = "0.1.0"
 keywords = ["antivirus", "async", "clamav"]
 
 [features]
