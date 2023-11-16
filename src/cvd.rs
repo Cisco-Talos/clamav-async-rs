@@ -29,7 +29,7 @@ pub use head_libclamav::Header;
 pub use head_native::Header;
 
 pub trait Meta {
-    /// Load fromm the initial bytes found at the beginning of the CVD/CLD
+    /// Load from the initial bytes found at the beginning of the CVD/CLD
     fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, HeadError>
     where
         Self: Sized;
@@ -125,7 +125,7 @@ pub enum HeadError {
 
     /// Header field contains non-UTF-8 content
     #[error("non-UTF-8 contenti: {0}")]
-    Utf80(#[from] Utf8Error),
+    Utf8(#[from] Utf8Error),
 
     /// Header field content can't be parsed as number
     #[error("unable to parse integer: {0}")]
