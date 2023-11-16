@@ -44,7 +44,7 @@ pub enum MapError {
 }
 
 #[cfg(windows)]
-extern "C" fn cl_pread(
+extern "C" fn pread_cb(
     handle: *mut os::raw::c_void,
     buf: *mut os::raw::c_void,
     count: os::raw::c_ulonglong,
@@ -77,7 +77,7 @@ extern "C" fn cl_pread(
 }
 
 #[cfg(unix)]
-extern "C" fn cl_pread(
+extern "C" fn pread_cb(
     handle: *mut os::raw::c_void,
     buf: *mut os::raw::c_void,
     count: usize,
@@ -137,7 +137,7 @@ impl Fmap {
         #[cfg(windows)]
         let fd = file.as_raw_handle();
         let fmap = unsafe {
-            cl_fmap_open_handle(fd as *mut c_void, offset, len, Some(cl_pread), aging.into())
+            cl_fmap_open_handle(fd as *mut c_void, offset, len, Some(pread_cb), aging.into())
         };
         Self {
             handle: Arc::new(Mutex::new(FmapHandle {
