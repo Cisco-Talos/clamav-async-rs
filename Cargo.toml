@@ -40,7 +40,7 @@ tokio-stream = { version = "0.1" }
 clamav-sys = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-bindings = { version = "0.5.5", package = "clamav-rs-bindings" }
+bindings = { version = "0.5", package = "clamav-rs-bindings" }
 
 [dev-dependencies]
 tempfile = "3"
