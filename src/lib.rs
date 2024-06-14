@@ -39,7 +39,7 @@ pub use engine::Error as EngineError;
 pub use error::Error as ClamError;
 use lazy_static::lazy_static;
 use std::{
-    ffi::CStr,
+    ffi::{c_char, CStr},
     pin::Pin,
     sync::{Arc, Mutex, Once},
 };
@@ -112,8 +112,8 @@ pub fn set_msg_callback(cb: MsgCallback) {
 ///
 unsafe extern "C" fn clcb_msg_wrapper(
     severity: clamav_sys::cl_msg,
-    fullmsg: *const i8,
-    msg: *const i8,
+    fullmsg: *const c_char,
+    msg: *const c_char,
     _context: *mut libc::c_void,
 ) {
     // Remap the log level to "standard" Rust log levels
