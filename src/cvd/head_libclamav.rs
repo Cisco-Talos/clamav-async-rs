@@ -15,7 +15,10 @@
 // MA 02110-1301, USA.
 
 use super::{HeadError, Meta};
-use std::{borrow::Cow, ffi::CStr};
+use std::{
+    borrow::Cow,
+    ffi::{c_char, CStr},
+};
 
 /// The header of a CVD
 pub struct Header(*mut clamav_sys::cl_cvd);
@@ -25,7 +28,7 @@ impl Meta for Header {
     /// (or CLD) file
     fn from_header_bytes(bytes: &[u8; 512]) -> Result<Self, HeadError> {
         unsafe {
-            let raw = clamav_sys::cl_cvdparse(bytes.as_ptr() as *const i8);
+            let raw = clamav_sys::cl_cvdparse(bytes.as_ptr() as *const c_char);
 
             if raw.is_null() {
                 Err(HeadError::Parse)

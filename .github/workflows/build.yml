@@ -1,0 +1,36 @@
+name: ClamAV Async Build Test
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+env:
+  CLAMAV_VERSION: 1.4.2
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (rustup)
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Install ClamAV
+        shell: bash
+        run: |
+          wget https://github.com/Cisco-Talos/clamav/releases/download/clamav-$CLAMAV_VERSION/clamav-$CLAMAV_VERSION.linux.x86_64.deb
+          sudo dpkg -i clamav-$CLAMAV_VERSION.linux.x86_64.deb
+
+      - name: Build clamav-async
+        shell: bash
+        run: cargo build --release
+
+      - name: Run clamav-async tests
+        shell: bash
+        run: LD_LIBRARY_PATH=/usr/local/lib cargo test --release

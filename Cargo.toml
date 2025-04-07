@@ -12,7 +12,7 @@ homepage = "https://github.com/Cisco-Talos/clamav-async-rs"
 license = "GPL-2.0"
 name = "clamav-async"
 repository = "https://github.com/Cisco-Talos/clamav-async-rs"
-version = "0.2.0"
+version = "0.3.0"
 keywords = ["antivirus", "async", "clamav"]
 
 [features]

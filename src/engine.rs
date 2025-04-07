@@ -19,7 +19,7 @@ use clamav_sys::cl_engine_field;
 use clamav_sys::{cl_error_t, time_t};
 use core::num;
 use derivative::Derivative;
-use std::ffi::NulError;
+use std::ffi::{c_char, NulError};
 use std::{path::Path, pin::Pin, sync::Arc, time};
 
 #[cfg(windows)]
@@ -45,7 +45,10 @@ pub enum ScanResult {
 }
 
 impl ScanResult {
-    pub(crate) fn from_ffi(scan_result: cl_error_t, c_virname: *const i8) -> Result<Self, Error> {
+    pub(crate) fn from_ffi(
+        scan_result: cl_error_t,
+        c_virname: *const c_char,
+    ) -> Result<Self, Error> {
         use std::ffi::CStr;
 
         match scan_result {
