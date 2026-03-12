@@ -23,8 +23,6 @@ pub mod db;
 pub mod engine;
 mod error;
 pub mod fmap;
-/// File inspection layer attributes
-pub mod layer_attr;
 pub mod scan_settings;
 pub mod version;
 
@@ -77,6 +75,13 @@ pub fn initialize() -> Result<(), ClamError> {
             cl_error_t::CL_SUCCESS => Ok(()),
             _ => Err(ClamError::new(RESULT)),
         }
+    }
+}
+
+/// Enables libclamav debug logging.
+pub fn debug() {
+    unsafe {
+        clamav_sys::cl_debug();
     }
 }
 

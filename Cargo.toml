@@ -3,6 +3,7 @@ authors = [
   "Scott Hutton <schutton@cisco.com>",
   "Zachary Sims <zac@icebergdefender.com>",
   "Jonas Zaddach <jzaddach@cisco.com>",
+  "Valerie Snyder <valsnyde@cisco.com>",
 ]
 categories = ["api-bindings"]
 description = "Async ClamAV bindings for Rust"
@@ -12,7 +13,7 @@ homepage = "https://github.com/Cisco-Talos/clamav-async-rs"
 license = "GPL-2.0"
 name = "clamav-async"
 repository = "https://github.com/Cisco-Talos/clamav-async-rs"
-version = "0.3.0"
+version = "0.4.0"
 keywords = ["antivirus", "async", "clamav"]
 
 [features]
@@ -37,10 +38,13 @@ time = { version = "0.3", features = [
 ] }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tokio-stream = { version = "0.1" }
-clamav-sys = "1.0"
+clamav-sys = { git = "https://github.com/Cisco-Talos/clamav-sys", branch = "CLAM-2881-clamav-1.5-apis" }
 
 [target.'cfg(windows)'.dependencies]
 bindings = { version = "0.5", package = "clamav-rs-bindings" }
 
 [dev-dependencies]
 tempfile = "3"
+clam-sigutil = { git = "https://github.com/Cisco-Talos/clamav-signature-util", tag = "1.2.4" }
+sha2 = "0.10"
+zip = "2"

@@ -43,7 +43,7 @@ impl Error {
 
     #[must_use]
     pub fn code(&self) -> u32 {
-        self.code.0
+        u32::from(self.code)
     }
 }
 

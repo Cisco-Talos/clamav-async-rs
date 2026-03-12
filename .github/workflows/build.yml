@@ -1,5 +1,8 @@
 name: ClamAV Async Build Test
 
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches:
@@ -9,7 +12,7 @@ on:
       - main
 
 env:
-  CLAMAV_VERSION: 1.4.2
+  CLAMAV_VERSION: 1.4.3
 
 jobs:
   build-ubuntu:
