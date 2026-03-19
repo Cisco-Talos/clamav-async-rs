@@ -1,4 +1,4 @@
-name: ClamAV Async Build Test
+name: Build and Test
 
 permissions:
   contents: read
@@ -7,33 +7,135 @@ on:
   pull_request:
     branches:
       - main
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 env:
-  CLAMAV_VERSION: 1.4.3
+  CLAMAV_VERSION: 1.5.2
 
 jobs:
-  build-ubuntu:
+  linux:
+    name: Linux (${{ matrix.mode }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - pkg-config
+          - manual
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (rustup)
+      - name: Install Rust
         run: rustup update stable --no-self-update && rustup default stable
 
-      - name: Install ClamAV
+      - name: Install Linux build dependencies
         shell: bash
         run: |
-          wget https://github.com/Cisco-Talos/clamav/releases/download/clamav-$CLAMAV_VERSION/clamav-$CLAMAV_VERSION.linux.x86_64.deb
-          sudo dpkg -i clamav-$CLAMAV_VERSION.linux.x86_64.deb
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
 
-      - name: Build clamav-async
+      - name: Install ClamAV release package
         shell: bash
-        run: cargo build --release
+        run: |
+          wget "https://github.com/Cisco-Talos/clamav/releases/download/clamav-${CLAMAV_VERSION}/clamav-${CLAMAV_VERSION}.linux.x86_64.deb"
+          sudo dpkg -i "clamav-${CLAMAV_VERSION}.linux.x86_64.deb"
 
-      - name: Run clamav-async tests
+      - name: Build and test with pkg-config
+        if: matrix.mode == 'pkg-config'
         shell: bash
-        run: LD_LIBRARY_PATH=/usr/local/lib cargo test --release
+        env:
+          LD_LIBRARY_PATH: /usr/local/lib
+        run: cargo test -- --test-threads=1
+
+      - name: Build and test with manual library paths
+        if: matrix.mode == 'manual'
+        shell: bash
+        env:
+          CLAMAV_LIBRARY: /usr/local/lib/libclamav.so
+          CLAMAV_INCLUDE: /usr/local/include
+          OPENSSL_INCLUDE: /usr/include
+          LD_LIBRARY_PATH: /usr/local/lib
+        run: cargo test -- --test-threads=1
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Install Homebrew dependencies
+        shell: bash
+        run: |
+          brew update
+          brew install clamav openssl@3 pkg-config
+
+      - name: Build and test
+        shell: bash
+        env:
+          OPENSSL_INCLUDE: ${{ runner.temp }}/openssl-include
+          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/opt/homebrew/opt/clamav/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/opt/clamav/lib/pkgconfig:/usr/local/opt/openssl@3/lib/pkgconfig
+          DYLD_LIBRARY_PATH: /opt/homebrew/lib:/opt/homebrew/opt/clamav/lib:/opt/homebrew/opt/openssl@3/lib:/usr/local/lib:/usr/local/opt/clamav/lib:/usr/local/opt/openssl@3/lib
+        run: |
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          mkdir -p "$OPENSSL_INCLUDE"
+          rm -rf "$OPENSSL_INCLUDE"
+          ln -s "$OPENSSL_PREFIX/include" "$OPENSSL_INCLUDE"
+          cargo test -- --test-threads=1
+
+  windows:
+    name: Windows (${{ matrix.mode }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+          - vcpkg
+          - manual
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        shell: powershell
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - name: Install LLVM
+        shell: powershell
+        run: choco install llvm --no-progress -y
+
+      - name: Set up vcpkg
+        shell: powershell
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          & C:\vcpkg\bootstrap-vcpkg.bat
+          & C:\vcpkg\vcpkg.exe install clamav:x64-windows openssl:x64-windows
+
+      - name: Build and test with vcpkg discovery
+        if: matrix.mode == 'vcpkg'
+        shell: powershell
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKGRS_DYNAMIC: 1
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $env:PATH = "C:\vcpkg\installed\x64-windows\bin;$env:PATH"
+          cargo test -- --test-threads=1
+
+      - name: Build and test with manual library paths
+        if: matrix.mode == 'manual'
+        shell: powershell
+        env:
+          CLAMAV_LIBRARY: C:\vcpkg\installed\x64-windows\lib\clamav.lib
+          CLAMAV_INCLUDE: C:\vcpkg\installed\x64-windows\include
+          OPENSSL_INCLUDE: C:\vcpkg\installed\x64-windows\include
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $env:PATH = "C:\vcpkg\installed\x64-windows\bin;$env:PATH"
+          cargo test -- --test-threads=1
