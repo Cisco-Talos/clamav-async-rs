@@ -13,6 +13,12 @@ repository.
   - `src/callback.rs`
   - `src/fmap.rs`
   - `src/scan_settings.rs`
+- Other notable modules:
+  - `src/db.rs`: default database directory helper
+  - `src/cvd.rs`: CVD/CLD header parsing
+  - `src/version.rs`: engine version and flevel helpers
+  - `src/error.rs`: wrapper for raw `cl_error_t`
+  - `src/windows_fd.rs`: Windows-only handle conversion support
 
 ## Local Build Environment
 
@@ -74,18 +80,27 @@ initialization is process-global and several tests use temporary fixtures.
   - Must be called before using the engine.
 - `debug()` in `src/lib.rs`
   - Wraps `clamav_sys::cl_debug()`.
+- `set_msg_callback()` in `src/lib.rs`
+  - Overrides libclamav's global message callback.
+  - libclamav does not provide a way to restore the default callback afterward.
 - `engine::Engine`
   - Create with `Engine::new()`
   - Load databases with `load_databases()`
+  - Or stream progress with `load_databases_with_progress()`
   - Compile with `compile()`
+  - Or stream progress with `compile_with_progress()`
   - Scan with `scan()`
   - Register callbacks with `register_callback()`
+- `engine::ScanEvent`
+  - `scan()` returns a `tokio_stream` of per-layer events followed by a terminal result.
 - `callback::ScanLayer`
   - Callback closures receive `&mut ScanLayer`
   - Access metadata via methods instead of separate callback arguments
 - `fmap::Fmap`
   - Wraps `cl_fmap_t`
   - Supports file-backed, memory-backed, and borrowed callback-layer fmaps
+- `scan_settings::ScanSettings`
+  - Thin low-level wrapper over `cl_scan_options` using Rust bitflags
 
 ## Callback Model
 
@@ -111,18 +126,34 @@ Fn(&mut ScanLayer) -> ScanLogicResult
 - `ScanLayer` caches its layer fmap as `Option<Fmap>`.
 - `ScanLayer::data()` and `Fmap::data()` return borrowed slices into
   libclamav-managed memory. Copy data inside the callback if it is needed later.
+- `ScanLayer` itself is callback-scoped. Do not retain it or borrowed data past
+  the callback boundary.
 - `ScanLayer::ancestor_ids()` is expected to return only parent layer ids, not
   the current layer id.
 - Nested scans such as zip archives produce multiple callback events. Do not
   assume only one top-level file event sequence.
 - `Engine::scan()` keeps C strings alive until the FFI call completes. Do not
   regress this by taking raw pointers from temporary `CString`s.
+- The engine handle is treated as thread-safe only while options are not being
+  mutated. Be careful around changes to engine configuration after sharing it.
+- Callback wrappers currently swallow several libclamav metadata lookup errors
+  and continue scanning. When debugging "missing" events or metadata, inspect
+  `src/callback.rs` before assuming the engine never emitted the callback.
 
 ## Testing Landmarks
 
 - Callback-heavy tests live in `src/callback.rs`.
+  - This includes the most important nested archive / zip behavior tests.
 - Engine registration tests live in `src/engine.rs`.
+  - Engine compile and database loading smoke tests also live there.
 - `Fmap` unit tests live in `src/fmap.rs`.
+- Lightweight unit tests for initialization, db/version/error helpers live in:
+  - `src/lib.rs`
+  - `src/db.rs`
+  - `src/version.rs`
+  - `src/error.rs`
+- `tests/scan_eicar_test_virus.rs` currently contains only `mod common;`; most
+  substantive coverage is inline unit tests rather than integration tests.
 - Fixture files:
   - `test_data/files/good_file`
   - `test_data/files/naughty_file`
@@ -143,6 +174,13 @@ env CLAMAV_LIBRARY=/path/to/libclamav.so \
     CLAMAV_INCLUDE=/path/to/clamav/include \
     OPENSSL_INCLUDE=/path/to/openssl/include \
     cargo test fmap::tests:: -- --test-threads=1
+```
+
+```bash
+env CLAMAV_LIBRARY=/path/to/libclamav.so \
+    CLAMAV_INCLUDE=/path/to/clamav/include \
+    OPENSSL_INCLUDE=/path/to/openssl/include \
+    cargo test engine::tests:: -- --test-threads=1
 ```
 
 ## Examples and Documentation
