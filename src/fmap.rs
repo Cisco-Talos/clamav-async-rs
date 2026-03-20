@@ -24,7 +24,10 @@ use std::{
     ffi::{self, CStr},
     fs::File,
     num::TryFromIntError,
-    os::{self, raw::{c_char, c_void}},
+    os::{
+        self,
+        raw::{c_char, c_void},
+    },
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -156,24 +159,23 @@ impl TryFrom<File> for Fmap {
         let offset = 0;
         let len = file.metadata()?.len();
         let aging = true;
-        Ok(Self::from_file(file, offset, len.try_into()?, aging))
+        Self::from_file(file, offset, len.try_into()?, aging)
     }
 }
 
 impl Fmap {
     /// Creates a file-backed `Fmap` over a byte range within `file`.
-    pub fn from_file(file: File, offset: usize, len: usize, aging: bool) -> Self {
+    pub fn from_file(file: File, offset: usize, len: usize, aging: bool) -> Result<Self, MapError> {
         #[cfg(unix)]
         let fd = file.as_raw_fd();
         #[cfg(windows)]
-        let windows_fd =
-            WindowsFd::new(file.as_raw_handle()).expect("converting Windows HANDLE to fd");
+        let windows_fd = WindowsFd::new(file.as_raw_handle())?;
         #[cfg(windows)]
         let fd = windows_fd.raw();
         let fmap = unsafe {
             cl_fmap_open_handle(fd as *mut c_void, offset, len, Some(pread_cb), aging.into())
         };
-        Self {
+        Ok(Self {
             handle: Arc::new(Mutex::new(FmapHandle {
                 owns_fmap: true,
                 fmap,
@@ -181,7 +183,7 @@ impl Fmap {
                 #[cfg(windows)]
                 _windows_fd: Some(windows_fd),
             })),
-        }
+        })
     }
 
     pub(crate) unsafe fn from_raw_borrowed(fmap: *mut cl_fmap_t) -> Self {
