@@ -19,6 +19,7 @@ use clamav_sys::cl_error_t;
 use std::{
     ffi::CStr,
     os::raw::{c_char, c_void},
+    panic::{self, AssertUnwindSafe},
     sync::Arc,
 };
 
@@ -81,6 +82,20 @@ fn scan_logic_result_to_cl(result: ScanLogicResult) -> cl_error_t {
         ScanLogicResult::Success => cl_error_t::CL_SUCCESS,
         ScanLogicResult::Match => cl_error_t::CL_VIRUS,
         ScanLogicResult::Trust => cl_error_t::CL_VERIFIED,
+    }
+}
+
+fn invoke_scan_logic(
+    logic: &ScanLayerLogic,
+    scan_layer: &mut ScanLayer,
+    callback_name: &'static str,
+) -> Result<ScanLogicResult, cl_error_t> {
+    match panic::catch_unwind(AssertUnwindSafe(|| logic(scan_layer))) {
+        Ok(decision) => Ok(decision),
+        Err(_) => {
+            log::error!("panic in {callback_name} scan callback; aborting scan");
+            Err(cl_error_t::CL_BREAK)
+        }
     }
 }
 
@@ -310,7 +325,10 @@ pub(crate) unsafe extern "C" fn engine_callback_match(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<MatchLogic>>());
         if let Some(logic) = match_logic {
-            decision = logic(&mut scan_layer);
+            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "match") {
+                Ok(decision) => decision,
+                Err(err) => return err,
+            };
         }
 
         if decision == ScanLogicResult::Success || decision == ScanLogicResult::Trust {
@@ -368,7 +386,10 @@ pub(crate) unsafe extern "C" fn engine_callback_file_type(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<FileTypeLogic>>());
         if let Some(logic) = file_type_logic {
-            decision = logic(&mut scan_layer);
+            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "file-type") {
+                Ok(decision) => decision,
+                Err(err) => return err,
+            };
         }
 
         let _ = cxt.sender.blocking_send(ScanEvent::FileType {
@@ -423,7 +444,10 @@ pub(crate) unsafe extern "C" fn engine_callback_pre_scan(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<PreScanLogic>>());
         if let Some(logic) = pre_scan_logic {
-            decision = logic(&mut scan_layer);
+            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "pre-scan") {
+                Ok(decision) => decision,
+                Err(err) => return err,
+            };
         }
 
         let _ = cxt.sender.blocking_send(ScanEvent::PreScan {
@@ -477,7 +501,10 @@ pub(crate) unsafe extern "C" fn engine_callback_post_scan(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<PostScanLogic>>());
         if let Some(logic) = post_scan_logic {
-            decision = logic(&mut scan_layer);
+            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "post-scan") {
+                Ok(decision) => decision,
+                Err(err) => return err,
+            };
         }
 
         let _ = cxt.sender.blocking_send(ScanEvent::PostScan {
@@ -815,6 +842,41 @@ mod tests {
         assert!(
             *hit.lock().unwrap(),
             "registered pre-scan trust callback should run"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_in_callback_is_caught_and_aborts_scan() {
+        let fixture_path = "test_data/files/good_file";
+        let (file_name, _file_size, _sha2_256) = fixture_metadata(fixture_path);
+
+        crate::initialize().expect("initialize should succeed");
+
+        let mut engine = configured_engine().await;
+        engine.register_callback(
+            EngineCallback::PreScan,
+            Box::new(|_scan_layer: &mut crate::callback::ScanLayer| {
+                panic!("callback panic should be caught inside the FFI shim");
+            }),
+        );
+
+        let events = scan_and_collect_events(
+            &engine,
+            Fmap::try_from(File::open(fixture_path).expect("opening good_file should succeed"))
+                .expect("file-backed fmap creation should succeed"),
+            Some(&file_name),
+        )
+        .await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ScanEvent::PreScan { .. })),
+            "a panicking callback should abort before emitting the callback event"
+        );
+        assert!(
+            matches!(events.as_slice(), [ScanEvent::Result(_)]),
+            "a panicking callback should still terminate through the normal result channel instead of unwinding across FFI"
         );
     }
 
@@ -1470,8 +1532,11 @@ mod tests {
         let zip_file_path = temp_dir.path().join("good_file.zip");
         let inner_contents = fs::read(inner_fixture_path).expect("fixture should be readable");
         fs::write(&inner_file_path, &inner_contents).expect("inner test file should be written");
-        fs::write(&zip_file_path, stored_zip_bytes("good_file", &inner_contents))
-            .expect("zip archive should be written");
+        fs::write(
+            &zip_file_path,
+            stored_zip_bytes("good_file", &inner_contents),
+        )
+        .expect("zip archive should be written");
 
         let (zip_file_name, _zip_file_size, _zip_sha2_256) = fixture_metadata(
             zip_file_path

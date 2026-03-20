@@ -91,6 +91,8 @@ initialization is process-global and several tests use temporary fixtures.
   - Or stream progress with `compile_with_progress()`
   - Scan with `scan()`
   - Register callbacks with `register_callback()`
+  - Treat loading, callback registration, settings changes, and compile as a
+    single-threaded setup phase before sharing the engine for scans
 - `engine::ScanEvent`
   - `scan()` returns a `tokio_stream` of per-layer events followed by a terminal result.
 - `callback::ScanLayer`
@@ -136,6 +138,9 @@ Fn(&mut ScanLayer) -> ScanLogicResult
   regress this by taking raw pointers from temporary `CString`s.
 - The engine handle is treated as thread-safe only while options are not being
   mutated. Be careful around changes to engine configuration after sharing it.
+- `Engine::register_callback()` is setup-time only. Concurrent registration with
+  scans, compile, or other engine mutations is unsupported. The current
+  implementation blocks until it can take exclusive access to the engine.
 - Callback wrappers currently swallow several libclamav metadata lookup errors
   and continue scanning. When debugging "missing" events or metadata, inspect
   `src/callback.rs` before assuming the engine never emitted the callback.

@@ -176,11 +176,15 @@ pub enum SettingsValue {
     Time(ClamTime),
 }
 
-// #[derive(Clone)]
 /// Configured libclamav engine used to load databases and scan content.
 ///
 /// Create the engine with [`Engine::new`], load databases, compile it, and then
 /// reuse it across scans.
+///
+/// Treat engine setup as a single-threaded phase: load databases, register
+/// callbacks, adjust engine settings, and compile before sharing the engine
+/// across threads or using it for scans. Once the engine is in active use,
+/// mutation APIs are not intended to be called concurrently.
 pub struct Engine {
     handle: Arc<RwLock<EngineHandle>>,
     pre_scan_logic: Option<Arc<dyn std::any::Any + Send + Sync>>,
@@ -240,16 +244,25 @@ impl Engine {
     ///
     /// Register callbacks before calling [`Engine::scan`]. Registering a new
     /// callback for the same hook replaces the previously stored callback.
+    ///
+    /// This is part of engine setup and is expected to be called before the
+    /// engine is shared across threads or used for scans or compilation work.
+    /// Calling it concurrently with other engine operations is not supported.
+    ///
+    /// Current behavior: if the engine is in use, this method blocks until it
+    /// can take exclusive access to register the callback.
     pub fn register_callback(
         &mut self,
         callback: crate::callback::EngineCallback,
         operation: Box<crate::callback::ScanLayerLogic>,
     ) {
         use crate::callback;
-        let engine_handle = self
-            .handle
-            .try_read()
-            .expect("engine handle lock should not be contended during callback registration");
+        let engine_handle = loop {
+            if let Ok(engine_handle) = self.handle.try_write() {
+                break engine_handle;
+            }
+            std::thread::yield_now();
+        };
 
         unsafe {
             match callback {
@@ -783,7 +796,11 @@ mod ffi {
 mod tests {
     use super::*;
     use crate::callback;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{mpsc, Arc, Mutex},
+        thread,
+        time::Duration,
+    };
 
     const TEST_DATABASES_PATH: &str = "test_data/database/";
     const EXAMPLE_DATABASE_PATH: &str = "test_data/database/example.cud";
@@ -948,5 +965,66 @@ mod tests {
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
         assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
         assert!(*hit.lock().unwrap(), "registered match closure should run");
+    }
+
+    #[test]
+    fn register_callback_waits_for_engine_lock_instead_of_panicking() {
+        crate::initialize().expect("initialize should succeed");
+        let hit = Arc::new(Mutex::new(false));
+        let engine = Arc::new(Mutex::new(Engine::new()));
+        let handle = engine.lock().unwrap().handle();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let lock_thread = thread::spawn(move || {
+            let _guard = handle.blocking_read();
+            locked_tx
+                .send(())
+                .expect("lock acquisition signal should succeed");
+            release_rx
+                .recv()
+                .expect("release signal receipt should succeed");
+        });
+
+        locked_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("background thread should hold the engine lock");
+
+        let register_engine = engine.clone();
+        let register_hit = hit.clone();
+        let register_thread = thread::spawn(move || {
+            register_engine.lock().unwrap().register_callback(
+                callback::EngineCallback::PreScan,
+                pre_scan_operation(register_hit),
+            );
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        assert!(
+            !register_thread.is_finished(),
+            "callback registration should wait while the engine is in use"
+        );
+
+        release_tx
+            .send(())
+            .expect("release signal send should succeed");
+        register_thread
+            .join()
+            .expect("registration thread should succeed");
+        lock_thread.join().expect("lock thread should succeed");
+
+        let engine = engine.lock().unwrap();
+        let logic = engine
+            .pre_scan_logic
+            .as_ref()
+            .expect("pre-scan logic should be stored after the wait")
+            .downcast_ref::<Box<callback::PreScanLogic>>()
+            .expect("stored logic should have pre-scan callback type");
+        let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
+        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert!(
+            *hit.lock().unwrap(),
+            "registered pre-scan closure should run after waiting for the lock"
+        );
     }
 }

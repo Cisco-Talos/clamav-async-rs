@@ -68,6 +68,10 @@ initialization.
 Create an [`Engine`](src/engine.rs), load databases, then compile and reuse that
 engine for scans instead of rebuilding it for every file.
 
+Treat engine setup as a single-threaded phase. Load databases, register
+callbacks, adjust settings, and compile before sharing the engine across
+threads or starting scans.
+
 ### Register callbacks before scanning
 
 If you need scan-layer visibility, register callbacks on the engine before
@@ -82,6 +86,11 @@ starting the scan. Callback operations receive a mutable
 - SHA-256
 - mapped file data
 - last match name
+
+Do not call `register_callback()` concurrently with scans, compilation, or
+other engine mutation. The current implementation will block until callback
+registration can take exclusive access to the engine, but setup-before-sharing
+is still the intended usage pattern.
 
 ### Copy callback data you need to keep
 
