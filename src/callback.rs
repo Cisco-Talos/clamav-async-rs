@@ -181,21 +181,22 @@ impl ScanLayer {
     /// Returns the mapped file backing this scan layer.
     ///
     /// The first call fetches and caches the layer fmap from libclamav.
-    pub fn fmap(&mut self) -> Result<Fmap, EngineError> {
-        if let Some(fmap) = &self.fmap {
-            return Ok(fmap.clone());
+    pub fn fmap(&mut self) -> Result<&Fmap, EngineError> {
+        if self.fmap.is_none() {
+            let mut fmap_ptr: *mut clamav_sys::cl_fmap_t = std::ptr::null_mut();
+            let cl_result: cl_error_t = unsafe {
+                clamav_sys::cl_scan_layer_get_fmap(self.layer, &mut fmap_ptr as *mut *mut _)
+            };
+            if cl_result != cl_error_t::CL_SUCCESS || fmap_ptr.is_null() {
+                return Err(EngineError::Clam(crate::error::Error::from(cl_result)));
+            }
+
+            let fmap = unsafe { Fmap::from_raw_borrowed(fmap_ptr) };
+            self.fmap = Some(fmap);
         }
 
-        let mut fmap_ptr: *mut clamav_sys::cl_fmap_t = std::ptr::null_mut();
-        let cl_result: cl_error_t =
-            unsafe { clamav_sys::cl_scan_layer_get_fmap(self.layer, &mut fmap_ptr as *mut *mut _) };
-        if cl_result != cl_error_t::CL_SUCCESS || fmap_ptr.is_null() {
-            Err(EngineError::Clam(crate::error::Error::from(cl_result)))
-        } else {
-            let fmap = unsafe { Fmap::from_raw_borrowed(fmap_ptr) };
-            self.fmap = Some(fmap.clone());
-            Ok(fmap)
-        }
+        // Safe to unwrap: we either had a cached fmap or just populated it above.
+        Ok(self.fmap.as_ref().unwrap())
     }
 
     /// Returns the object ids of all ancestor layers, nearest parent first.
