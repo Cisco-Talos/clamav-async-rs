@@ -287,31 +287,36 @@ pub(crate) unsafe extern "C" fn engine_callback_match(
 
         let object_id = match scan_layer.object_id() {
             Ok(id) => id,
-            Err(_) => return cl_error_t::CL_SUCCESS, // handle error?
+            // Return CL_VIRUS to preserve the match, despite the error in this handler.
+            Err(_) => return cl_error_t::CL_VIRUS, // handle error?
         };
 
         let file_type = match scan_layer.type_() {
             Ok(ft) => ft,
-            Err(_) => return cl_error_t::CL_SUCCESS, // handle error?
+            // Return CL_VIRUS to preserve the match, despite the error in this handler.
+            Err(_) => return cl_error_t::CL_VIRUS, // handle error?
         };
 
         let ancestor_ids = match scan_layer.ancestor_ids() {
             Ok(ids) => ids,
-            Err(_) => Vec::new(), // handle error?
+            // Return CL_VIRUS to preserve the match, despite the error in this handler.
+            Err(_) => return cl_error_t::CL_VIRUS, // handle error?
         };
 
         let file_name = scan_layer.file_name();
         let file_size = scan_layer.file_size();
         let sha2_256 = match scan_layer.sha2_256() {
             Ok(hash) => hash,
-            Err(_) => String::new(), // handle error?
+            // Return CL_VIRUS to preserve the match, despite the error in this handler.
+            Err(_) => return cl_error_t::CL_VIRUS, // handle error?
         };
 
         // Get the last match name
         let mut match_out: *const c_char = std::ptr::null();
         let cl_result = unsafe { clamav_sys::cl_scan_layer_get_last_alert(layer, &mut match_out) };
         if cl_result != cl_error_t::CL_SUCCESS {
-            return cl_error_t::CL_SUCCESS; // handle error?
+            // Return CL_VIRUS to preserve the match, despite the error in this handler.
+            return cl_error_t::CL_VIRUS; // handle error?
         }
         let match_name = if match_out.is_null() {
             String::from("Unknown")
