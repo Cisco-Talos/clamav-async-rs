@@ -444,7 +444,7 @@ pub(crate) unsafe extern "C" fn engine_callback_pre_scan(
         };
 
         // Run the user-defined pre-scan logic, if it exists.
-        // This is expected to be used for things like deciding if we must calculate the sha2-256 hash.
+        // This can be used for custom decisions or side effects before emitting the PreScan event.
         let pre_scan_logic = cxt
             .pre_scan_logic
             .as_ref()
