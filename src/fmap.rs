@@ -14,11 +14,6 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
 // MA 02110-1301, USA.
 
-#[cfg(windows)]
-use bindings::Windows::{
-    Win32::System::Diagnostics::Debug::GetLastError,
-    Win32::System::Diagnostics::Debug::ERROR_HANDLE_EOF,
-};
 use clamav_sys::{cl_fmap_close, cl_fmap_open_handle, cl_fmap_open_memory, cl_fmap_t};
 use std::{
     ffi::{self, CStr},
@@ -84,11 +79,10 @@ unsafe extern "C" fn pread_cb(
 
     let read_bytes = _read(fd, buf, count);
     if read_bytes == -1 {
-        let err = GetLastError();
-        if err != ERROR_HANDLE_EOF {
-            return -1;
-        }
-        return 0;
+        // `_read` reports failures via the CRT and returns `0` for EOF. Do not
+        // consult `GetLastError()` here; a stale Win32 last-error value could
+        // incorrectly turn a real read failure into a silent EOF.
+        return -1;
     }
 
     match clamav_sys::off_t::try_from(read_bytes) {
