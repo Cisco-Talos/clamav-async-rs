@@ -89,6 +89,8 @@ jobs:
 
   windows-vcpkg:
     name: Windows (vcpkg)
+    # Re-enable once vcpkg packages ClamAV 1.5+ for this crate's API requirements.
+    if: ${{ false }}
     runs-on: windows-latest
 
     steps:
