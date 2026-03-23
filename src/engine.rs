@@ -24,9 +24,13 @@ use clamav_sys::{
 use core::num;
 use derivative::Derivative;
 use std::ffi::{c_char, NulError};
-use std::{path::Path, sync::Arc, time};
+use std::{
+    path::Path,
+    sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    time,
+};
 
-use {tokio::sync::RwLock, tokio_stream::wrappers::ReceiverStream};
+use tokio_stream::wrappers::ReceiverStream;
 
 /// Summary information returned after loading a signature database.
 #[derive(Debug)]
@@ -208,6 +212,20 @@ impl EngineHandle {
 unsafe impl Send for EngineHandle {}
 unsafe impl Sync for EngineHandle {}
 
+fn read_engine_handle(lock: &RwLock<EngineHandle>) -> RwLockReadGuard<'_, EngineHandle> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_engine_handle(lock: &RwLock<EngineHandle>) -> RwLockWriteGuard<'_, EngineHandle> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// All errors that can be reported during engine configuration and execution.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -257,12 +275,7 @@ impl Engine {
         operation: Box<crate::callback::ScanLayerLogic>,
     ) {
         use crate::callback;
-        let engine_handle = loop {
-            if let Ok(engine_handle) = self.handle.try_write() {
-                break engine_handle;
-            }
-            std::thread::yield_now();
-        };
+        let engine_handle = write_engine_handle(self.handle.as_ref());
 
         unsafe {
             match callback {
@@ -315,8 +328,10 @@ impl Engine {
     /// Compiles the currently loaded signature databases.
     pub async fn compile(&self) -> Result<(), Error> {
         let engine_handle = self.handle();
-        tokio::task::spawn_blocking(move || ffi::compile(engine_handle.blocking_write().as_ptr()))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            ffi::compile(write_engine_handle(&engine_handle).as_ptr())
+        })
+        .await?
     }
 
     /// Compiles the currently loaded signatures and streams progress updates.
@@ -327,7 +342,7 @@ impl Engine {
         let engine_handle = self.handle();
 
         tokio::task::spawn_blocking(move || unsafe {
-            let engine_handle = engine_handle.blocking_write();
+            let engine_handle = write_engine_handle(&engine_handle);
             let context = Box::into_raw(Box::new(sender));
 
             clamav_sys::cl_engine_set_clcb_engine_compile_progress(
@@ -361,7 +376,7 @@ impl Engine {
         let engine_handle = self.handle();
         let dbpath = dbpath.as_ref().to_owned();
         tokio::task::spawn_blocking(move || {
-            let engine_handle = engine_handle.blocking_write();
+            let engine_handle = write_engine_handle(&engine_handle);
             let result = ffi::load_databases(dbpath.as_ref(), engine_handle.as_ptr());
             result
         })
@@ -383,7 +398,7 @@ impl Engine {
         let engine_handle = self.handle();
 
         tokio::task::spawn_blocking(move || unsafe {
-            let engine_handle = engine_handle.blocking_write();
+            let engine_handle = write_engine_handle(&engine_handle);
             let context = Box::into_raw(Box::new(sender));
             clamav_sys::cl_engine_set_clcb_sigload_progress(
                 engine_handle.as_ptr(),
@@ -476,7 +491,7 @@ impl Engine {
                     &mut verdict,
                     &mut last_match,
                     &mut scanned_out,
-                    engine_handle.blocking_read().as_ptr(),
+                    read_engine_handle(&engine_handle).as_ptr(),
                     &mut settings.settings,
                     c_sender.cast::<c_void>(),
                     c_hash_hint_ptr,
@@ -502,13 +517,13 @@ impl Engine {
 
     async fn get(&self, field: cl_engine_field) -> Result<SettingsValue, Error> {
         let engine_handle = self.handle();
-        let engine_handle = engine_handle.read().await;
+        let engine_handle = read_engine_handle(&engine_handle);
         ffi::get(engine_handle.as_ptr(), field)
     }
 
     async fn set(&self, field: cl_engine_field, value: SettingsValue) -> Result<(), Error> {
         dbg!(&field, &value);
-        let engine_handle = self.handle.write().await;
+        let engine_handle = write_engine_handle(self.handle.as_ref());
         ffi::set(engine_handle.as_ptr(), field, value).map_err(Error::from)
     }
 
@@ -977,7 +992,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
 
         let lock_thread = thread::spawn(move || {
-            let _guard = handle.blocking_read();
+            let _guard = read_engine_handle(&handle);
             locked_tx
                 .send(())
                 .expect("lock acquisition signal should succeed");
