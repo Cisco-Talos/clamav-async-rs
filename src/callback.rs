@@ -26,6 +26,7 @@ use std::{
 /// A wrapper structure around the context passed to callbacks that execute with scans
 pub(crate) struct ScanCbContext {
     pub(crate) sender: tokio::sync::mpsc::Sender<ScanEvent>,
+    pub(crate) scan_context: Option<ScanContext>,
     /// Additional user-defined logic for various callback types
     pub(crate) pre_scan_logic: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub(crate) post_scan_logic: Option<Arc<dyn std::any::Any + Send + Sync>>,
@@ -45,11 +46,41 @@ pub enum EngineCallback {
     FileType,
 }
 
+/// Opaque per-scan application context forwarded to scan callbacks.
+///
+/// The wrapped pointer is never dereferenced by this crate. Callers are
+/// responsible for ensuring that any pointed-to data remains valid and is safe
+/// to access from the blocking scan worker thread for the entire scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanContext(*mut c_void);
+
+impl ScanContext {
+    /// Creates a new opaque scan context from a raw pointer.
+    pub fn from_ptr(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
+    /// Returns the wrapped raw pointer.
+    pub fn as_ptr(self) -> *mut c_void {
+        self.0
+    }
+}
+
+// Safety: this type only carries an opaque pointer value. Callers are
+// responsible for ensuring that the pointed-to data is valid to access across
+// threads for the duration of the scan.
+unsafe impl Send for ScanContext {}
+unsafe impl Sync for ScanContext {}
+
 /// Trait object type used for scan-layer callback closures.
 ///
 /// Callback logic receives mutable access to a [`ScanLayer`] so it can inspect
-/// the current layer and optionally cache its [`Fmap`].
-pub type ScanLayerLogic = dyn Fn(&mut ScanLayer) -> ScanLogicResult + Send + Sync;
+/// the current layer and optionally cache its [`Fmap`]. The optional scan
+/// context is an opaque per-scan pointer supplied by the caller of
+/// [`crate::engine::Engine::scan`]; this crate stores and forwards the pointer
+/// but never dereferences it.
+pub type ScanLayerLogic =
+    dyn Fn(&mut ScanLayer, Option<ScanContext>) -> ScanLogicResult + Send + Sync;
 /// Callback signature used for pre-scan callbacks.
 pub type PreScanLogic = ScanLayerLogic;
 /// Callback signature used for post-scan callbacks.
@@ -88,9 +119,10 @@ fn scan_logic_result_to_cl(result: ScanLogicResult) -> cl_error_t {
 fn invoke_scan_logic(
     logic: &ScanLayerLogic,
     scan_layer: &mut ScanLayer,
+    scan_context: Option<ScanContext>,
     callback_name: &'static str,
 ) -> Result<ScanLogicResult, cl_error_t> {
-    match panic::catch_unwind(AssertUnwindSafe(|| logic(scan_layer))) {
+    match panic::catch_unwind(AssertUnwindSafe(|| logic(scan_layer, scan_context))) {
         Ok(decision) => Ok(decision),
         Err(_) => {
             log::error!("panic in {callback_name} scan callback; aborting scan");
@@ -332,10 +364,12 @@ pub(crate) unsafe extern "C" fn engine_callback_match(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<MatchLogic>>());
         if let Some(logic) = match_logic {
-            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "match") {
-                Ok(decision) => decision,
-                Err(err) => return err,
-            };
+            decision =
+                match invoke_scan_logic(logic.as_ref(), &mut scan_layer, cxt.scan_context, "match")
+                {
+                    Ok(decision) => decision,
+                    Err(err) => return err,
+                };
         }
 
         if decision == ScanLogicResult::Success || decision == ScanLogicResult::Trust {
@@ -393,7 +427,12 @@ pub(crate) unsafe extern "C" fn engine_callback_file_type(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<FileTypeLogic>>());
         if let Some(logic) = file_type_logic {
-            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "file-type") {
+            decision = match invoke_scan_logic(
+                logic.as_ref(),
+                &mut scan_layer,
+                cxt.scan_context,
+                "file-type",
+            ) {
                 Ok(decision) => decision,
                 Err(err) => return err,
             };
@@ -451,7 +490,12 @@ pub(crate) unsafe extern "C" fn engine_callback_pre_scan(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<PreScanLogic>>());
         if let Some(logic) = pre_scan_logic {
-            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "pre-scan") {
+            decision = match invoke_scan_logic(
+                logic.as_ref(),
+                &mut scan_layer,
+                cxt.scan_context,
+                "pre-scan",
+            ) {
                 Ok(decision) => decision,
                 Err(err) => return err,
             };
@@ -508,7 +552,12 @@ pub(crate) unsafe extern "C" fn engine_callback_post_scan(
             .as_ref()
             .and_then(|logic| logic.downcast_ref::<Box<PostScanLogic>>());
         if let Some(logic) = post_scan_logic {
-            decision = match invoke_scan_logic(logic.as_ref(), &mut scan_layer, "post-scan") {
+            decision = match invoke_scan_logic(
+                logic.as_ref(),
+                &mut scan_layer,
+                cxt.scan_context,
+                "post-scan",
+            ) {
                 Ok(decision) => decision,
                 Err(err) => return err,
             };
@@ -576,7 +625,7 @@ mod tests {
         filename: Option<&str>,
     ) -> Vec<ScanEvent> {
         let mut stream = engine
-            .scan(target, filename, None, None, None, scan_settings())
+            .scan(target, filename, None, None, None, scan_settings(), None)
             .expect("scan setup should succeed");
 
         let mut events = Vec::new();
@@ -653,58 +702,68 @@ mod tests {
     }
 
     fn pre_scan_operation(hit: Arc<Mutex<bool>>) -> Box<crate::callback::PreScanLogic> {
-        Box::new(move |_scan_layer: &mut crate::callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            // Return Success here to keep scanning.
-            ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                // Return Success here to keep scanning.
+                ScanLogicResult::Success
+            },
+        )
     }
 
     fn pre_scan_trust_operation(hit: Arc<Mutex<bool>>) -> Box<crate::callback::PreScanLogic> {
-        Box::new(move |_scan_layer: &mut crate::callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            // Return Trust here to stop scanning the current layer, and mark the result as trusted.
-            // The parent layer will not be marked as trusted, and the scan will continue.
-            ScanLogicResult::Trust
-        })
+        Box::new(
+            move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                // Return Trust here to stop scanning the current layer, and mark the result as trusted.
+                // The parent layer will not be marked as trusted, and the scan will continue.
+                ScanLogicResult::Trust
+            },
+        )
     }
 
     fn post_scan_operation(hit: Arc<Mutex<bool>>) -> Box<crate::callback::PostScanLogic> {
-        Box::new(move |_scan_layer: &mut crate::callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            // Return Success here to keep scanning.
-            ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                // Return Success here to keep scanning.
+                ScanLogicResult::Success
+            },
+        )
     }
 
     fn file_type_operation(
         hit: Arc<Mutex<bool>>,
         observed_file_type: Arc<Mutex<Option<String>>>,
     ) -> Box<crate::callback::FileTypeLogic> {
-        Box::new(move |scan_layer: &mut crate::callback::ScanLayer| {
-            *observed_file_type.lock().unwrap() =
-                Some(scan_layer.type_().expect("file type should be available"));
-            *hit.lock().unwrap() = true;
-            // Return Success here to keep scanning.
-            ScanLogicResult::Success
-        })
+        Box::new(
+            move |scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                *observed_file_type.lock().unwrap() =
+                    Some(scan_layer.type_().expect("file type should be available"));
+                *hit.lock().unwrap() = true;
+                // Return Success here to keep scanning.
+                ScanLogicResult::Success
+            },
+        )
     }
 
     fn match_operation(
         hit: Arc<Mutex<bool>>,
         copied_data: Arc<Mutex<Option<Vec<u8>>>>,
     ) -> Box<crate::callback::MatchLogic> {
-        Box::new(move |scan_layer: &mut crate::callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            *copied_data.lock().unwrap() = Some(
-                scan_layer
-                    .data(0, 0)
-                    .expect("data retrieval should succeed")
-                    .to_vec(),
-            );
-            // Return Match here to agree with the match, so it isn't dropped.
-            ScanLogicResult::Match
-        })
+        Box::new(
+            move |scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                *copied_data.lock().unwrap() = Some(
+                    scan_layer
+                        .data(0, 0)
+                        .expect("data retrieval should succeed")
+                        .to_vec(),
+                );
+                // Return Match here to agree with the match, so it isn't dropped.
+                ScanLogicResult::Match
+            },
+        )
     }
 
     // Goal: prove that a registered pre-scan callback runs for a simple file scan.
@@ -862,9 +921,11 @@ mod tests {
         let mut engine = configured_engine().await;
         engine.register_callback(
             EngineCallback::PreScan,
-            Box::new(|_scan_layer: &mut crate::callback::ScanLayer| {
-                panic!("callback panic should be caught inside the FFI shim");
-            }),
+            Box::new(
+                |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
+                    panic!("callback panic should be caught inside the FFI shim");
+                },
+            ),
         );
 
         let events = scan_and_collect_events(
@@ -1188,7 +1249,7 @@ mod tests {
             EngineCallback::FileType,
             Box::new({
                 let file_type_count = file_type_count.clone();
-                move |_scan_layer: &mut crate::callback::ScanLayer| {
+                move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
                     *file_type_count.lock().unwrap() += 1;
                     ScanLogicResult::Success
                 }
@@ -1198,7 +1259,7 @@ mod tests {
             EngineCallback::PreScan,
             Box::new({
                 let pre_scan_count = pre_scan_count.clone();
-                move |_scan_layer: &mut crate::callback::ScanLayer| {
+                move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
                     *pre_scan_count.lock().unwrap() += 1;
                     ScanLogicResult::Success
                 }
@@ -1208,7 +1269,7 @@ mod tests {
             EngineCallback::Match,
             Box::new({
                 let match_count = match_count.clone();
-                move |scan_layer: &mut crate::callback::ScanLayer| {
+                move |scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
                     *match_count.lock().unwrap() += 1;
 
                     if scan_layer
@@ -1231,7 +1292,7 @@ mod tests {
             EngineCallback::PostScan,
             Box::new({
                 let post_scan_count = post_scan_count.clone();
-                move |_scan_layer: &mut crate::callback::ScanLayer| {
+                move |_scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
                     *post_scan_count.lock().unwrap() += 1;
                     ScanLogicResult::Success
                 }
@@ -1558,7 +1619,7 @@ mod tests {
             EngineCallback::PreScan,
             Box::new({
                 let hit = hit.clone();
-                move |scan_layer: &mut crate::callback::ScanLayer| {
+                move |scan_layer: &mut crate::callback::ScanLayer, _scan_context| {
                     let file_type = scan_layer.type_().expect("file type should be available");
                     if file_type == "CL_TYPE_TEXT_ASCII" {
                         *hit.lock().unwrap() = true;
@@ -1589,5 +1650,62 @@ mod tests {
             ),
             "returning Trust for the inner text file should leave the overall zip scan with no matches found"
         );
+    }
+
+    #[tokio::test]
+    async fn pre_scan_callback_receives_scan_context() {
+        let hit = Arc::new(Mutex::new(false));
+        let observed_context = Arc::new(Mutex::new(None::<usize>));
+        let fixture_path = "test_data/files/good_file";
+        let (file_name, _file_size, _sha2_256) = fixture_metadata(fixture_path);
+        let scan_context = Box::into_raw(Box::new(0xC1A0_u64)).cast::<std::ffi::c_void>();
+
+        crate::initialize().expect("initialize should succeed");
+
+        let mut engine = configured_engine().await;
+        engine.register_callback(
+            EngineCallback::PreScan,
+            Box::new({
+                let hit = hit.clone();
+                let observed_context = observed_context.clone();
+                move |_scan_layer: &mut crate::callback::ScanLayer, scan_context| {
+                    *hit.lock().unwrap() = true;
+                    *observed_context.lock().unwrap() =
+                        scan_context.map(|context| context.as_ptr() as usize);
+                    ScanLogicResult::Success
+                }
+            }),
+        );
+
+        let target =
+            Fmap::try_from(File::open(fixture_path).expect("opening good_file should succeed"))
+                .expect("file-backed fmap creation should succeed");
+        let mut stream = engine
+            .scan(
+                target,
+                Some(&file_name),
+                None,
+                None,
+                None,
+                scan_settings(),
+                Some(crate::callback::ScanContext::from_ptr(scan_context)),
+            )
+            .expect("scan setup should succeed");
+
+        while stream.next().await.is_some() {}
+
+        assert!(
+            *hit.lock().unwrap(),
+            "registered pre-scan callback should run"
+        );
+        assert_eq!(
+            *observed_context.lock().unwrap(),
+            Some(scan_context as usize),
+            "scan callback should receive the per-scan opaque context pointer"
+        );
+
+        unsafe {
+            drop(Box::from_raw(scan_context.cast::<u64>()));
+        }
     }
 }

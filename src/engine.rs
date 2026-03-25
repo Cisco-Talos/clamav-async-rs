@@ -431,7 +431,9 @@ impl Engine {
     ///
     /// The scan runs on a blocking worker thread. The returned stream yields
     /// intermediate callback events followed by a terminal
-    /// [`ScanEvent::Result`].
+    /// [`ScanEvent::Result`]. If provided, `scan_context` is forwarded as an
+    /// opaque pointer to each registered scan callback for the lifetime of the
+    /// scan; this crate never dereferences it.
     pub fn scan<T: Into<crate::fmap::Fmap>>(
         &self,
         target: T,
@@ -440,6 +442,7 @@ impl Engine {
         hash_hint: Option<&str>,
         hash_algorithm: Option<&str>,
         mut settings: crate::scan_settings::ScanSettings,
+        scan_context: Option<crate::callback::ScanContext>,
     ) -> Result<ReceiverStream<ScanEvent>, Error> {
         use crate::callback::ScanCbContext;
         use crate::fmap::Fmap;
@@ -468,6 +471,7 @@ impl Engine {
             let mut scanned_out = 0_u64;
             let scan_cb_context = ScanCbContext {
                 sender: sender.clone(),
+                scan_context,
                 pre_scan_logic,
                 post_scan_logic,
                 file_type_logic,
@@ -821,31 +825,39 @@ mod tests {
     const EXAMPLE_DATABASE_PATH: &str = "test_data/database/example.cud";
 
     fn pre_scan_operation(hit: Arc<Mutex<bool>>) -> Box<callback::PreScanLogic> {
-        Box::new(move |_scan_layer: &mut callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            callback::ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                callback::ScanLogicResult::Success
+            },
+        )
     }
 
     fn post_scan_operation(hit: Arc<Mutex<bool>>) -> Box<callback::PostScanLogic> {
-        Box::new(move |_scan_layer: &mut callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            callback::ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                callback::ScanLogicResult::Success
+            },
+        )
     }
 
     fn file_type_operation(hit: Arc<Mutex<bool>>) -> Box<callback::FileTypeLogic> {
-        Box::new(move |_scan_layer: &mut callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            callback::ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                callback::ScanLogicResult::Success
+            },
+        )
     }
 
     fn match_operation(hit: Arc<Mutex<bool>>) -> Box<callback::MatchLogic> {
-        Box::new(move |_scan_layer: &mut callback::ScanLayer| {
-            *hit.lock().unwrap() = true;
-            callback::ScanLogicResult::Success
-        })
+        Box::new(
+            move |_scan_layer: &mut callback::ScanLayer, _scan_context| {
+                *hit.lock().unwrap() = true;
+                callback::ScanLogicResult::Success
+            },
+        )
     }
 
     #[tokio::test]
@@ -906,7 +918,10 @@ mod tests {
             .downcast_ref::<Box<callback::PreScanLogic>>()
             .expect("stored logic should have pre-scan callback type");
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
-        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert_eq!(
+            logic(&mut scan_layer, None),
+            callback::ScanLogicResult::Success
+        );
         assert!(
             *hit.lock().unwrap(),
             "registered pre-scan closure should run"
@@ -930,7 +945,10 @@ mod tests {
             .downcast_ref::<Box<callback::FileTypeLogic>>()
             .expect("stored logic should have file-type callback type");
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
-        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert_eq!(
+            logic(&mut scan_layer, None),
+            callback::ScanLogicResult::Success
+        );
         assert!(
             *hit.lock().unwrap(),
             "registered file-type closure should run"
@@ -954,7 +972,10 @@ mod tests {
             .downcast_ref::<Box<callback::PostScanLogic>>()
             .expect("stored logic should have post-scan callback type");
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
-        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert_eq!(
+            logic(&mut scan_layer, None),
+            callback::ScanLogicResult::Success
+        );
         assert!(
             *hit.lock().unwrap(),
             "registered post-scan closure should run"
@@ -978,7 +999,10 @@ mod tests {
             .downcast_ref::<Box<callback::MatchLogic>>()
             .expect("stored logic should have match callback type");
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
-        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert_eq!(
+            logic(&mut scan_layer, None),
+            callback::ScanLogicResult::Success
+        );
         assert!(*hit.lock().unwrap(), "registered match closure should run");
     }
 
@@ -1036,7 +1060,10 @@ mod tests {
             .downcast_ref::<Box<callback::PreScanLogic>>()
             .expect("stored logic should have pre-scan callback type");
         let mut scan_layer = callback::ScanLayer::new(std::ptr::null_mut());
-        assert_eq!(logic(&mut scan_layer), callback::ScanLogicResult::Success);
+        assert_eq!(
+            logic(&mut scan_layer, None),
+            callback::ScanLogicResult::Success
+        );
         assert!(
             *hit.lock().unwrap(),
             "registered pre-scan closure should run after waiting for the lock"

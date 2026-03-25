@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = Engine::new();
     engine.register_callback(
         EngineCallback::FileType,
-        Box::new(|layer| {
+        Box::new(|layer, _scan_context| {
             let file_type = layer.type_().expect("file type should be available");
             let file_size = layer.file_size();
 
@@ -69,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         None,
         scan_settings(),
+        None,
     )?;
 
     while let Some(event) = events.next().await {
