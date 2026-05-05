@@ -115,6 +115,9 @@ bitflags! {
     }
 }
 
+/// Scan option flags passed to libclamav for a scan.
+///
+/// This is the low-level representation used by [`crate::engine::Engine::scan`].
 #[derive(Default)]
 pub struct ScanSettings {
     pub settings: cl_scan_options,
@@ -122,46 +125,56 @@ pub struct ScanSettings {
 
 impl ScanSettings {
     #[must_use]
+    /// Returns the currently configured general scan flags.
     pub fn general(&self) -> GeneralFlags {
         GeneralFlags::from_bits(self.settings.general).unwrap_or(GeneralFlags::empty())
     }
 
+    /// Replaces the general scan flags.
     pub fn set_general(&mut self, flags: &GeneralFlags) {
         self.settings.general = flags.bits();
     }
 
     #[must_use]
+    /// Returns the currently configured parse flags.
     pub fn parse(&self) -> ParseFlags {
         ParseFlags::from_bits(self.settings.parse).unwrap_or(ParseFlags::empty())
     }
 
+    /// Replaces the parse flags.
     pub fn set_parse(&mut self, flags: &ParseFlags) {
         self.settings.parse = flags.bits();
     }
 
     #[must_use]
+    /// Returns the currently configured heuristic flags.
     pub fn heuristic(&self) -> HeuristicFlags {
         HeuristicFlags::from_bits(self.settings.heuristic).unwrap_or(HeuristicFlags::empty())
     }
 
+    /// Replaces the heuristic flags.
     pub fn set_heuristic(&mut self, flags: &HeuristicFlags) {
         self.settings.heuristic = flags.bits();
     }
 
     #[must_use]
+    /// Returns the currently configured mail parsing flags.
     pub fn mail(&self) -> MailFlags {
         MailFlags::from_bits(self.settings.mail).unwrap_or(MailFlags::empty())
     }
 
+    /// Replaces the mail parsing flags.
     pub fn set_mail(&mut self, flags: &MailFlags) {
         self.settings.mail = flags.bits();
     }
 
     #[must_use]
+    /// Returns the currently configured development flags.
     pub fn dev(&self) -> DevFlags {
         DevFlags::from_bits(self.settings.dev).unwrap_or(DevFlags::empty())
     }
 
+    /// Replaces the development flags.
     pub fn set_dev(&mut self, flags: &DevFlags) {
         self.settings.dev = flags.bits();
     }
@@ -300,12 +313,14 @@ impl ToString for ScanSettings {
     }
 }
 
+/// Fluent builder for constructing [`ScanSettings`] values.
 pub struct Builder {
     current: cl_scan_options,
 }
 
 impl Builder {
     #[must_use]
+    /// Creates an empty builder with all libclamav scan flags disabled.
     pub fn new() -> Self {
         Builder {
             current: cl_scan_options::default(),
@@ -313,6 +328,7 @@ impl Builder {
     }
 
     #[must_use]
+    /// Builds a [`ScanSettings`] snapshot from the current builder state.
     pub fn build(&self) -> ScanSettings {
         ScanSettings {
             settings: self.current,
